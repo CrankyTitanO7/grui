@@ -61,7 +61,8 @@ Click **Open Player** in the main window to browse saved recordings:
 
 1. Pick a recording from the list (or **Browse…**). Video plays with a
    live keyboard/mouse state view that stays in exact sync via
-   `frames.jsonl`.
+   `frames.jsonl`. Keyboard events are drawn on the timeline as yellow
+   dots (they follow cuts/pastes/undo).
 2. **Drag on the timeline** to select a region (click to seek — the
    selection is drawn with clear edge borders and shows its duration;
    **Select All** / **Deselect**, `Ctrl+A`, `Esc`). **Trim** keeps only

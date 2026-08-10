@@ -1,11 +1,13 @@
 """Editable timeline bar for the player.
 
-Draws the clip sequence, annotations (markers), the selection and the
-playhead. Clicking seeks; dragging left-to-right (or right-to-left) selects
-a region. Colors:
+Draws the clip sequence, annotations (markers), keyboard events, the
+selection and the playhead. Clicking seeks; dragging left-to-right (or
+right-to-left) selects a region; hovering a keyboard-event dot shows the
+key and its timestamp in the label at the bottom. Colors:
 
 * clips      — dark slate with visible borders
 * markers    — yellow diamonds
+* keyboard events — yellow dots
 * selection  — translucent orange with bright edge borders + duration label
 * playhead   — red line
 """
@@ -16,7 +18,7 @@ import logging
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QWidget
 
 from editor.timeline import Timeline
 
@@ -24,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 _PAD = 8
 _RULER_H = 16
+_LABEL_H = 16
+_HOVER_RADIUS_PX = 6.0
 _CLIP_COLOR = QColor(58, 76, 92)
 _CLIP_EDGE = QColor(120, 150, 170)
 _SELECTION_COLOR = QColor(230, 140, 60, 110)
@@ -32,6 +36,7 @@ _SELECTION_TEXT = QColor(40, 30, 10)
 _PLAYHEAD_COLOR = QColor(231, 76, 60)
 _MARKER_COLOR = QColor(241, 196, 15)
 _RULER_COLOR = QColor(170, 170, 170)
+_KEY_EVENT_COLOR = QColor(241, 196, 15)
 
 _DRAG_THRESHOLD_PX = 4.0
 
@@ -67,9 +72,15 @@ class TimelineWidget(QWidget):
         self._playhead = 0.0
         self._selection: tuple[float, float] | None = None
         self._markers: list[tuple[float, str]] = []
+        self._events: list[tuple[float, str]] = []  # (t, key code)
+        self._hovered: tuple[float, str] | None = None
         self._drag_start_x: float | None = None
         self._drag_start_t: float | None = None
         self._drag_active = False
+
+        self._hover_label = QLabel("", self)
+        self._hover_label.setStyleSheet("color: #d0d0d0; font-size: 8pt;")
+        self._hover_label.setContentsMargins(0, 0, 0, 0)
 
     # ------------------------------------------------------------ model
 
@@ -81,6 +92,11 @@ class TimelineWidget(QWidget):
 
     def set_playhead(self, t: float) -> None:
         self._playhead = t
+        self.update()
+
+    def set_events(self, events: list[tuple[float, str]]) -> None:
+        """Keyboard events (t, key code) drawn as yellow dots."""
+        self._events = sorted(events)
         self.update()
 
     def set_selection(self, selection: tuple[float, float] | None) -> None:
@@ -95,7 +111,7 @@ class TimelineWidget(QWidget):
 
     def _plot_rect(self) -> QRectF:
         rect = QRectF(self.rect())
-        return rect.adjusted(_PAD, _RULER_H + 4, -_PAD, -4)
+        return rect.adjusted(_PAD, _RULER_H + 4, -_PAD, -_LABEL_H - 4)
 
     def _x_to_t(self, x: float) -> float:
         plot = self._plot_rect()
@@ -116,6 +132,7 @@ class TimelineWidget(QWidget):
             self._draw_clips(painter, plot)
         self._draw_markers(painter, plot)
         self._draw_selection(painter, plot)
+        self._draw_events(painter, plot)
         self._draw_playhead(painter, plot)
         painter.end()
 
@@ -181,6 +198,16 @@ class TimelineWidget(QWidget):
                 f"{out_t - in_t:.1f}s",
             )
 
+    def _draw_events(self, painter: QPainter, plot: QRectF) -> None:
+        if not self._events or self._duration <= 0:
+            return
+        scale = plot.width() / self._duration
+        y = plot.center().y()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(_KEY_EVENT_COLOR)
+        for t, _ in self._events:
+            painter.drawEllipse(QPointF(plot.left() + t * scale, y), 2.5, 2.5)
+
     def _draw_playhead(self, painter: QPainter, plot: QRectF) -> None:
         if self._duration <= 0:
             return
@@ -189,6 +216,32 @@ class TimelineWidget(QWidget):
         painter.drawLine(int(x), int(plot.top() - _RULER_H), int(x), int(plot.bottom()))
 
     # ------------------------------------------------------------ events
+
+    def _nearest_event(self, x: float) -> tuple[float, str] | None:
+        """Event dot nearest to ``x`` (within the hover radius), else None."""
+        if not self._events or self._duration <= 0:
+            return None
+        plot = self._plot_rect()
+        scale = plot.width() / self._duration
+        best: tuple[float, str] | None = None
+        best_d = _HOVER_RADIUS_PX
+        for t, code in self._events:
+            distance = abs(plot.left() + t * scale - x)
+            if distance < best_d:
+                best_d = distance
+                best = (t, code)
+        return best
+
+    def _update_hover(self, x: float) -> None:
+        hovered = self._nearest_event(x)
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        if hovered is None:
+            self._hover_label.clear()
+        else:
+            t, code = hovered
+            self._hover_label.setText(f"{code} — {t:.2f}s")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -209,6 +262,8 @@ class TimelineWidget(QWidget):
                 self.update()
                 event.accept()
                 return
+        else:
+            self._update_hover(event.position().x())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -226,3 +281,12 @@ class TimelineWidget(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        super().leaveEvent(event)
+        self._hovered = None
+        self._hover_label.clear()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._hover_label.setGeometry(_PAD, self.height() - _LABEL_H, self.width() - 2 * _PAD, _LABEL_H)

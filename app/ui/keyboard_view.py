@@ -2,8 +2,8 @@
 
 The keyboard and mouse live in separate titled areas (boxes): the keyboard
 shows the complete layout (function row, numbers, QWERTY, modifiers, nav
-cluster, arrows, numpad) plus dynamic caps for unknown keys; the mouse box
-shows the button keys and a mini screen with the pointer position. Keycaps
+cluster, arrows, numpad) with the mouse buttons stacked to the right of the
+keys; the mouse box shows a mini screen with the pointer position. Keycaps
 shrink/expand with the window so the whole keyboard fits at once.
 """
 
@@ -136,9 +136,9 @@ _GRID_PLACEMENT: list[tuple[int, int, int, int, str]] = [
     (4, 20, 1, 1, "Key1"), (4, 21, 1, 1, "Key2"), (4, 22, 1, 1, "Key3"),
     (4, 23, 1, 2, "Key.enter"),
     (5, 20, 2, 1, "Key0"), (5, 22, 1, 1, "Key."),
-    # mouse buttons (unified with the keyboard)
-    (6, 20, 1, 1, "button:left"), (6, 21, 1, 1, "button:right"),
-    (6, 22, 2, 1, "button:middle"),
+    # mouse buttons (stacked to the right of all keyboard keys)
+    (1, 25, 1, 1, "button:left"), (2, 25, 1, 1, "button:right"),
+    (3, 25, 1, 1, "button:middle"),
 ]
 
 
@@ -226,7 +226,6 @@ class KeyboardView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._caps: dict[str, list[KeyCap]] = {}
-        self._extra_codes: list[str] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -253,19 +252,6 @@ class KeyboardView(QWidget):
         scroll.setWidget(host)
         kb_layout.addWidget(scroll)
         kb_layout.addStretch(1)
-
-        extras_row = QHBoxLayout()
-        extras_row.addWidget(QLabel("Other keys:"))
-        self._extras_area = QScrollArea()
-        self._extras_area.setWidgetResizable(True)
-        self._extras_area.setFixedHeight(36)
-        self._extras_host = QWidget()
-        self._extras_layout = QHBoxLayout(self._extras_host)
-        self._extras_layout.setContentsMargins(0, 0, 0, 0)
-        self._extras_layout.setSpacing(4)
-        self._extras_area.setWidget(self._extras_host)
-        extras_row.addWidget(self._extras_area, 1)
-        kb_layout.addLayout(extras_row)
         root.addWidget(self._keyboard_group)
 
         self._mouse_group = QGroupBox("Mouse")
@@ -279,23 +265,6 @@ class KeyboardView(QWidget):
     # ------------------------------------------------------------ config
 
     def configure(self, used_codes: set[str], screen_size: tuple[int, int] | None = None) -> None:
-        """Rebuild dynamic caps for codes not on the keyboard layout."""
-        while self._extras_layout.count():
-            item = self._extras_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for code in self._extra_codes:
-            self._caps.pop(code, None)
-        self._extra_codes = []
-        for code in sorted(used_codes):
-            if _canonical(code) in self._caps:
-                continue
-            cap = KeyCap(_cap_label(code))
-            self._caps.setdefault(code, []).append(cap)
-            self._extra_codes.append(code)
-            self._extras_layout.addWidget(cap)
-        self._extras_layout.addStretch(1)
         if screen_size is not None:
             self._mouse_surface.set_screen_size(*screen_size)
 

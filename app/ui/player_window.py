@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from app.ui.keyboard_view import KeyboardView
 from app.ui.timeline_widget import TimelineWidget
 from editor.export import export_recording
-from editor.timeline import EditSession
+from editor.timeline import EditSession, remap_events
 from player.event_state import KeyStateTimeline
 from player.video_reader import VideoReader
 from recorder.config import RecorderConfig
@@ -273,6 +273,7 @@ class PlayerWindow(QMainWindow):
             self._session.timeline.duration or recording.duration,
             [(m["t"], str(m.get("label", ""))) for m in recording.markers if "t" in m],
         )
+        self._timeline.set_events(self._timeline_events())
         self._timeline.clear_selection()
         self._update_selection_label()
 
@@ -423,12 +424,24 @@ class PlayerWindow(QMainWindow):
         self._timeline.clear_selection()
         self._update_selection_label()
 
+    def _timeline_events(self) -> list[tuple[float, str]]:
+        """Keyboard events (t, key code) mapped through the edited timeline."""
+        if self._recording is None or self._session is None:
+            return []
+        remapped = remap_events(self._recording.events, self._session.timeline)
+        return [
+            (float(event["t"]), str(event.get("code") or event.get("char") or "?"))
+            for event in remapped
+            if event.get("device") == "keyboard"
+        ]
+
     def _refresh_timeline_view(self) -> None:
         self._timeline.set_model(
             self._session.timeline,
             self._session.timeline.duration,
             [(m["t"], str(m.get("label", ""))) for m in self._recording.markers if "t" in m],
         )
+        self._timeline.set_events(self._timeline_events())
         self._update_time_label()
 
     def _warn_no_selection(self) -> None:

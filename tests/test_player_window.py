@@ -77,16 +77,19 @@ def test_reader_does_not_flood_queue(tmp_path):
 
 def test_edit_cut_undo_redo(window):
     original = window._session.timeline.duration
-    window._on_selection_changed((0.3, 0.6))
+    events_before = len(window._timeline._events)
+    window._on_selection_changed((0.0, 0.2))  # covers the first key event
     assert window._timeline_sel is not None
-    assert window._timeline_sel[0] == window._recording.snap_to_frame(0.3)
-    assert window._timeline_sel[1] == window._recording.snap_to_frame(0.6)
+    assert window._timeline_sel[0] == window._recording.snap_to_frame(0.0)
+    assert window._timeline_sel[1] == window._recording.snap_to_frame(0.2)
     window._on_cut()
     assert window._session.timeline.duration < original
     assert window._clipboard is not None
     assert window._timeline_sel is None  # cleared after the edit
+    assert len(window._timeline._events) < events_before  # events in the cut region drop
     window._on_undo()
     assert window._session.timeline.duration == original
+    assert len(window._timeline._events) == events_before
     window._on_redo()
     assert window._session.timeline.duration < original
 
@@ -179,6 +182,53 @@ def test_timeline_click_seeks_and_clears_selection(window):
     assert window._timeline_sel is None
 
 
+def test_timeline_shows_events(window):
+    from app.ui.timeline_widget import _KEY_EVENT_COLOR
+
+    timeline = window._timeline
+    # keyboard events only, no key differentiation — (time, code) pairs, sorted
+    assert len(timeline._events) == 2
+    assert timeline._events == sorted(timeline._events)
+    offset = timeline._timeline.clips[0].source_start
+    assert timeline._events[0][0] == pytest.approx(0.15 - offset, abs=1e-9)
+    assert timeline._events[1][0] == pytest.approx(0.75 - offset, abs=1e-9)
+    assert [code for _, code in timeline._events] == ["KeyW", "KeyW"]
+    assert _KEY_EVENT_COLOR.name() == "#f1c40f"  # yellow dots
+    assert not timeline.grab().isNull()  # paint path renders the dots
+
+
+def test_timeline_hover_shows_key_and_time(window):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    timeline = window._timeline
+    timeline.resize(800, 100)
+    duration = window._session.timeline.duration
+    plot = timeline._plot_rect()
+    offset = timeline._timeline.clips[0].source_start
+
+    def move_to(t):
+        x = plot.left() + (t / duration) * plot.width()
+        timeline.mouseMoveEvent(
+            QMouseEvent(
+                QEvent.Type.MouseMove, QPointF(x, plot.center().y()), QPointF(),
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+    move_to(0.15 - offset)  # hover exactly on the first dot
+    assert timeline._hovered is not None
+    assert timeline._hovered[0] == pytest.approx(0.15 - offset, abs=1e-9)
+    assert timeline._hovered[1] == "KeyW"
+    assert "KeyW" in timeline._hover_label.text()
+    assert "0.15" in timeline._hover_label.text()
+
+    move_to(1.5)  # far from any dot
+    assert timeline._hovered is None
+    assert timeline._hover_label.text() == ""
+
+
 def test_keyboard_mouse_buttons_unified(window):
     view = window._keyboard_view
     assert len(view._caps["button:left"]) == 1
@@ -202,10 +252,24 @@ def test_keyboard_and_mouse_areas(window):
     assert view._mouse_surface.parent() is view._mouse_group
 
 
+def test_mouse_buttons_right_of_keys_no_extras(window):
+    view = window._keyboard_view
+    key_cols = [col for _, col, _, _, code in _GRID_PLACEMENT if not code.startswith("button:")]
+    buttons = [
+        (row, col, code)
+        for row, col, _, _, code in _GRID_PLACEMENT
+        if code.startswith("button:")
+    ]
+    assert all(col > max(key_cols) for _, col, _ in buttons)
+    assert [code for _, _, code in buttons] == ["button:left", "button:right", "button:middle"]
+    assert set(view._caps) == {code for *_, code in _GRID_PLACEMENT}  # no dynamic extras
+    assert not hasattr(view, "_extras_area")
+
+
 def test_keyboard_fits_at_once(window):
     view = window._keyboard_view
     min_width = view._grid.minimumSize().width()
-    assert min_width < 700
+    assert min_width < 800
     assert window.minimumWidth() >= min_width
     # every physical key + mouse button has a cap in the grid
     grid_codes = {code for _, _, _, _, code in _GRID_PLACEMENT}

@@ -27,7 +27,7 @@ dev = ["pytest>=8.0"]
 imitate = "app.main:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "recorder*", "storage*", "dataset*"]
+include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*"]
 
 [tool.setuptools.package-data]
 dataset = ["README.md"]

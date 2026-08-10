@@ -124,8 +124,11 @@ class MainWindow(QMainWindow):
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop_clicked)
+        self._player_btn = QPushButton("Open Player")
+        self._player_btn.clicked.connect(self._on_open_player)
         btn_row.addWidget(self._start_btn)
         btn_row.addWidget(self._stop_btn)
+        btn_row.addWidget(self._player_btn)
         layout.addLayout(btn_row)
 
         ann_row = QHBoxLayout()
@@ -292,6 +295,15 @@ class MainWindow(QMainWindow):
                 session.resume()
         except Exception:  # noqa: BLE001
             logger.exception("pause/resume failed")
+
+    def _on_open_player(self) -> None:
+        from app.ui.player_window import PlayerWindow
+
+        if getattr(self, "_player_window", None) is None:
+            self._player_window = PlayerWindow()
+            self._player_window.destroyed.connect(lambda *_: setattr(self, "_player_window", None))
+        self._player_window.show()
+        self._player_window.raise_()
 
     # ------------------------------------------------------------- state
 

@@ -110,3 +110,67 @@ def patch_session_components(monkeypatch, session_module):
     monkeypatch.setattr(session_module, "MouseRecorder", FakeMouse)
     monkeypatch.setattr(session_module, "FFmpegEncoder", FakeEncoder)
     monkeypatch.setattr(session_module, "resolve_monitor_size", lambda index: (1920, 1080))
+
+
+def build_synthetic_recording(
+    root,
+    *,
+    session_id=None,
+    n_frames=30,
+    fps=10,
+    size=(48, 64),
+    events=None,
+    markers=None,
+):
+    """Create a real on-disk recording (true ffmpeg encode) for player/export tests.
+
+    Frame times are captured with a real SessionClock, so ``RecordingData.frame_times``
+    is exact; callers should compute expectations from the loaded data rather than
+    assuming absolute values.
+    """
+    import json
+    import queue
+    import uuid
+
+    import numpy as np
+
+    from recorder.clock import SessionClock
+    from recorder.config import EncoderConfig
+    from recorder.encoder import FFmpegEncoder
+    from storage.event_writer import EventWriter
+    from storage.recording import RawRecording, load_recording
+
+    session_id = session_id or f"synth-{uuid.uuid4().hex[:8]}"
+    height, width = size
+    metadata = {
+        "version": 1,
+        "session_id": session_id,
+        "platform": "test",
+        "screen": {"width": width, "height": height, "fps": fps, "monitor_index": 0},
+        "input": {"keyboard": True, "mouse": True},
+        "duration": 0.0,
+    }
+    recording = RawRecording.create(root, session_id, metadata)
+
+    frame_queue = queue.Queue()
+    frames_writer = EventWriter(recording.frames_path)
+    frames_writer.start()
+    clock = SessionClock()
+    encoder = FFmpegEncoder(EncoderConfig(), recording.video_path, frames_writer, frame_queue, clock, fps)
+    encoder.start()
+    rng = np.random.default_rng(7)
+    t = clock.now()
+    for _ in range(n_frames):
+        frame_queue.put((t, rng.integers(0, 256, (height, width, 3), dtype=np.uint8)))
+        t += 1.0 / fps
+    frame_queue.put(None)
+    encoder.stop()
+    frames_writer.stop()
+
+    for path, rows in ((recording.events_path, events or []), (recording.markers_path, markers or [])):
+        with open(path, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+
+    recording.update_metadata(duration=t)
+    return load_recording(recording.directory)

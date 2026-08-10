@@ -17,8 +17,11 @@ Then I "guided" the idea using constructive criticism. I encourage someone with 
 
 ## Status
 
-First milestone: reliably record screen + input into a portable raw
-demonstration. The dataset builder and ML training are explicitly out of
+Milestone 1: reliably record screen + input into a portable raw
+demonstration. Milestone 2: playback and editing — load any recording,
+watch the video with live key/mouse state, cut/copy/paste/trim/delete
+timeline clips with undo/redo, and save as a new recording (the original
+is never modified). The dataset builder and ML training remain out of
 scope for now.
 
 ## Quickstart
@@ -51,6 +54,26 @@ binary automatically; alternatively make `ffmpeg` available on `PATH`.
 | F8     | Stop recording |
 | F9     | Add annotation |
 | F10    | Pause/Resume   |
+
+## Player & editor
+
+Click **Open Player** in the main window to browse saved recordings:
+
+1. Pick a recording from the list (or **Browse…**). Video plays with a
+   live keyboard/mouse state view that stays in exact sync via
+   `frames.jsonl`.
+2. **Set In / Set Out** marks a selection (snapped to frame boundaries);
+   **Trim** keeps only the selection, **Cut** removes it (also copying it
+   to the clipboard), **Copy** copies without removing, **Paste** inserts
+   the clipboard at the playhead, **Delete** removes without copying.
+3. **Undo / Redo / Reset Edits** revert timeline changes.
+4. **Save Edits as New Recording…** exports a brand-new recording (video
+   re-encoded from kept frames, events/markers/frames remapped and
+   duplicated through pasted clips) — the source recording is untouched.
+
+Edits are stored in the exported `metadata.json` under `edit_clips` (and
+`edit_history`), so reopening the exported recording restores the same
+timeline.
 
 ## Raw recording format (version 1)
 
@@ -177,12 +200,17 @@ Never use it to capture credentials or other people's data without consent.
 
 Tests cover the clock, JSONL writers, recording directory/metadata,
 session lifecycle (with fake capture components), key/button serialization
-and real FFmpeg encoding of synthetic frames. Hardware-dependent pieces
-(screen grab, pynput listeners) are injectable and excluded from tests.
+and real FFmpeg encoding of synthetic frames — plus the timeline editor
+(cut/copy/paste/trim/delete, undo/redo, event remapping through pasted
+clips), the export pipeline (real re-encode + remap), the playback
+state timeline, and an offscreen player-window smoke test. Hardware-
+dependent pieces (screen grab, pynput listeners) are injectable and
+excluded from tests.
 
 ## Roadmap
 
 - [x] Raw recorder (screen, keyboard, mouse, markers, versioned format)
+- [x] Player + editor (live key view, timeline, cut/copy/paste/trim, undo/redo, save as new recording)
 - [ ] Window/region capture; overlay-region exclusion
 - [ ] Excluded-application list (privacy)
 - [ ] Dataset builder: `imitate dataset build <recording>`

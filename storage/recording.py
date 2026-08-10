@@ -1,4 +1,4 @@
-"""Raw demonstration directory and metadata management.
+"""Raw demonstration directory, metadata management and read-side model.
 
 The raw recording format is versioned from the beginning because future
 dataset-generation algorithms must be able to consume old recordings::
@@ -17,11 +17,38 @@ import json
 import logging
 import os
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    items = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    return items
+
+
+def _read_frame_times(path: Path) -> np.ndarray:
+    """Frame capture times indexed by frame index (from ``frames.jsonl``)."""
+    entries = _read_jsonl(path)
+    if not entries:
+        return np.array([], dtype=np.float64)
+    size = max(int(e["frame_index"]) for e in entries) + 1
+    times = np.zeros(size, dtype=np.float64)
+    for e in entries:
+        times[int(e["frame_index"])] = float(e["t"])
+    return times
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -105,3 +132,82 @@ class RawRecording:
         """Merge fields into the metadata and rewrite it atomically."""
         self._metadata.update(fields)
         _write_json_atomic(self.metadata_path, self._metadata)
+
+
+@dataclass
+class RecordingData:
+    """Read-side view of a raw recording (used by the player/editor)."""
+
+    directory: Path
+    metadata: dict[str, Any]
+    video_path: Path
+    frame_times: np.ndarray  # capture time per frame index (float64)
+    events: list[dict[str, Any]]
+    markers: list[dict[str, Any]]
+    fps: float
+    width: int
+    height: int
+
+    @property
+    def duration(self) -> float:
+        if self.frame_times.size:
+            return float(self.frame_times[-1])
+        return float(self.metadata.get("duration") or 0.0)
+
+    @property
+    def session_id(self) -> str:
+        return str(self.metadata.get("session_id") or "")
+
+    def frame_time(self, frame_index: int) -> float:
+        """Capture time of a video frame index (falls back to index/fps)."""
+        if 0 <= frame_index < self.frame_times.size:
+            return float(self.frame_times[frame_index])
+        return float(frame_index) / self.fps if self.fps else 0.0
+
+    def nearest_frame_index(self, t: float) -> int:
+        """Video frame index whose capture time is closest to ``t``."""
+        if self.frame_times.size:
+            idx = int(np.argmin(np.abs(self.frame_times - t)))
+            return max(0, idx)
+        return max(0, int(round(t * self.fps))) if self.fps else 0
+
+    def snap_to_frame(self, t: float) -> float:
+        """Nearest frame capture time, so edits always land on frame boundaries."""
+        return self.frame_time(self.nearest_frame_index(t))
+
+
+def load_recording(directory: Path | str) -> RecordingData:
+    """Load a raw recording directory into a :class:`RecordingData`.
+
+    Raises ``ValueError`` if the directory is not a recording.
+    """
+    directory = Path(directory)
+    metadata_path = directory / "metadata.json"
+    if not metadata_path.exists():
+        raise ValueError(f"not a recording (no metadata.json): {directory}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    screen = metadata.get("screen") or {}
+    fps = float(screen.get("fps") or 30.0)
+    return RecordingData(
+        directory=directory,
+        metadata=metadata,
+        video_path=directory / "video.mp4",
+        frame_times=_read_frame_times(directory / "frames.jsonl"),
+        events=_read_jsonl(directory / "events.jsonl"),
+        markers=_read_jsonl(directory / "markers.jsonl"),
+        fps=fps,
+        width=int(screen.get("width") or 0),
+        height=int(screen.get("height") or 0),
+    )
+
+
+def list_recordings(root: Path | str) -> list[Path]:
+    """All recording directories (containing metadata.json) under ``root``."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (p for p in root.iterdir() if p.is_dir() and (p / "metadata.json").exists()),
+        key=lambda p: p.name,
+        reverse=True,
+    )

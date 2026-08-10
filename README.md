@@ -62,11 +62,14 @@ Click **Open Player** in the main window to browse saved recordings:
 1. Pick a recording from the list (or **Browse…**). Video plays with a
    live keyboard/mouse state view that stays in exact sync via
    `frames.jsonl`.
-2. **Set In / Set Out** marks a selection (snapped to frame boundaries);
-   **Trim** keeps only the selection, **Cut** removes it (also copying it
-   to the clipboard), **Copy** copies without removing, **Paste** inserts
-   the clipboard at the playhead, **Delete** removes without copying.
-3. **Undo / Redo / Reset Edits** revert timeline changes.
+2. **Drag on the timeline** to select a region (click to seek — the
+   selection is drawn with clear edge borders and shows its duration;
+   **Select All** / **Deselect**, `Ctrl+A`, `Esc`). **Trim** keeps only
+   the selection, **Cut** removes it (also copying it to the clipboard),
+   **Copy** copies without removing, **Paste** inserts the clipboard at
+   the playhead, **Delete** removes without copying.
+3. **Undo / Redo / Reset Edits** revert timeline changes (`Ctrl+Z`,
+   `Ctrl+Y`, `Delete`, `Ctrl+X/C/V` shortcuts).
 4. **Save Edits as New Recording…** exports a brand-new recording (video
    re-encoded from kept frames, events/markers/frames remapped and
    duplicated through pasted clips) — the source recording is untouched.

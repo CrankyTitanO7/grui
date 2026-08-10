@@ -1,11 +1,12 @@
 """Editable timeline bar for the player.
 
-Draws the clip sequence, annotations (markers), the in/out selection and
-the playhead. Clicking seeks to that time. Colors:
+Draws the clip sequence, annotations (markers), the selection and the
+playhead. Clicking seeks; dragging left-to-right (or right-to-left) selects
+a region. Colors:
 
-* clips      — dark slate, rounded
+* clips      — dark slate with visible borders
 * markers    — yellow diamonds
-* selection  — orange tint
+* selection  — translucent orange with bright edge borders + duration label
 * playhead   — red line
 """
 
@@ -25,10 +26,14 @@ _PAD = 8
 _RULER_H = 16
 _CLIP_COLOR = QColor(58, 76, 92)
 _CLIP_EDGE = QColor(120, 150, 170)
-_SELECTION_COLOR = QColor(230, 140, 60, 90)
+_SELECTION_COLOR = QColor(230, 140, 60, 110)
+_SELECTION_EDGE = QColor(243, 156, 18)
+_SELECTION_TEXT = QColor(40, 30, 10)
 _PLAYHEAD_COLOR = QColor(231, 76, 60)
 _MARKER_COLOR = QColor(241, 196, 15)
 _RULER_COLOR = QColor(170, 170, 170)
+
+_DRAG_THRESHOLD_PX = 4.0
 
 _NICE_STEPS = (0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600)
 
@@ -50,6 +55,7 @@ class TimelineWidget(QWidget):
     """Interactive timeline: clips, markers, selection and playhead."""
 
     seeked = Signal(float)
+    selectionChanged = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -61,6 +67,9 @@ class TimelineWidget(QWidget):
         self._playhead = 0.0
         self._selection: tuple[float, float] | None = None
         self._markers: list[tuple[float, str]] = []
+        self._drag_start_x: float | None = None
+        self._drag_start_t: float | None = None
+        self._drag_active = False
 
     # ------------------------------------------------------------ model
 
@@ -159,7 +168,18 @@ class TimelineWidget(QWidget):
         in_t, out_t = self._selection
         left = plot.left() + (in_t / self._duration) * plot.width()
         right = plot.left() + (out_t / self._duration) * plot.width()
-        painter.fillRect(QRectF(left, plot.top(), right - left, plot.height()), _SELECTION_COLOR)
+        rect = QRectF(left, plot.top(), max(right - left, 1.0), plot.height())
+        painter.fillRect(rect, _SELECTION_COLOR)
+        painter.setPen(QPen(_SELECTION_EDGE, 2))
+        painter.drawLine(QPointF(left, plot.top()), QPointF(left, plot.bottom()))
+        painter.drawLine(QPointF(right, plot.top()), QPointF(right, plot.bottom()))
+        if right - left > 28:
+            painter.setPen(QPen(_SELECTION_TEXT, 1))
+            painter.drawText(
+                QRectF(left, plot.top(), right - left, 14),
+                Qt.AlignmentFlag.AlignHCenter,
+                f"{out_t - in_t:.1f}s",
+            )
 
     def _draw_playhead(self, painter: QPainter, plot: QRectF) -> None:
         if self._duration <= 0:
@@ -172,7 +192,37 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self.seeked.emit(self._x_to_t(event.position().x()))
+            self._drag_start_x = event.position().x()
+            self._drag_start_t = self._x_to_t(self._drag_start_x)
+            self._drag_active = False
             event.accept()
         else:
             super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_start_x is not None:
+            if not self._drag_active and abs(event.position().x() - self._drag_start_x) > _DRAG_THRESHOLD_PX:
+                self._drag_active = True
+            if self._drag_active:
+                lo, hi = sorted((self._drag_start_t, self._x_to_t(event.position().x())))
+                self._selection = (lo, hi)
+                self.update()
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_start_x is not None:
+            if self._drag_active and self._selection is not None:
+                self.selectionChanged.emit(self._selection)
+            else:
+                self.seeked.emit(self._x_to_t(event.position().x()))
+                self._selection = None
+                self.selectionChanged.emit(None)
+                self.update()
+            self._drag_start_x = None
+            self._drag_start_t = None
+            self._drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

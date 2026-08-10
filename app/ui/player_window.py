@@ -1,8 +1,9 @@
 """Player + editor window: play recordings, watch live keys, edit, save.
 
-Loading a recording opens it read-only. Edit operations (set in/out, trim,
-cut, copy, paste, delete, undo/redo) act on a clip-based timeline; saving
-exports a new raw recording (original untouched).
+Loading a recording opens it read-only. Drag on the timeline to select a
+region (click to seek); Cut/Copy/Paste/Delete/Trim act on the selection.
+Undo/redo and keyboard shortcuts are supported. Saving exports a new raw
+recording (original untouched).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -58,7 +59,7 @@ class PlayerWindow(QMainWindow):
     def __init__(self, recordings_root: Path | str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Recording Player")
-        self.resize(960, 780)
+        self.resize(1100, 840)
         self._root = Path(recordings_root) if recordings_root else RecorderConfig().output_dir
         self._recording: RecordingData | None = None
         self._reader: VideoReader | None = None
@@ -68,8 +69,24 @@ class PlayerWindow(QMainWindow):
         self._playing = False
         self._at_end = False
         self._current_t = 0.0
-        self._in_t: float | None = None
-        self._out_t: float | None = None
+        self._timeline_sel: tuple[float, float] | None = None
+
+        self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
+        self._select_all_shortcut.activated.connect(self._on_select_all)
+        self._deselect_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._deselect_shortcut.activated.connect(self._on_deselect)
+        self._delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self)
+        self._delete_shortcut.activated.connect(self._on_delete)
+        self._cut_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Cut), self)
+        self._cut_shortcut.activated.connect(self._on_cut)
+        self._copy_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Copy), self)
+        self._copy_shortcut.activated.connect(self._on_copy)
+        self._paste_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Paste), self)
+        self._paste_shortcut.activated.connect(self._on_paste)
+        self._undo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Undo), self)
+        self._undo_shortcut.activated.connect(self._on_undo)
+        self._redo_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Redo), self)
+        self._redo_shortcut.activated.connect(self._on_redo)
 
         self._build_ui()
         self._timer = QTimer(self)
@@ -109,6 +126,7 @@ class PlayerWindow(QMainWindow):
 
         self._timeline = TimelineWidget()
         self._timeline.seeked.connect(self._on_seek_requested)
+        self._timeline.selectionChanged.connect(self._on_selection_changed)
         root.addWidget(self._timeline)
 
         transport = QHBoxLayout()
@@ -127,10 +145,12 @@ class PlayerWindow(QMainWindow):
 
         edit_row = QHBoxLayout()
         edit_row.addWidget(QLabel("Selection:"))
-        self._in_btn = QPushButton("Set In")
-        self._in_btn.clicked.connect(lambda: self._set_boundary("in"))
-        self._out_btn = QPushButton("Set Out")
-        self._out_btn.clicked.connect(lambda: self._set_boundary("out"))
+        self._sel_label = QLabel("—")
+        self._sel_label.setStyleSheet("color: #888888;")
+        self._select_all_btn = QPushButton("Select All")
+        self._select_all_btn.clicked.connect(self._on_select_all)
+        self._deselect_btn = QPushButton("Deselect")
+        self._deselect_btn.clicked.connect(self._on_deselect)
         self._trim_btn = QPushButton("Trim")
         self._trim_btn.clicked.connect(self._on_trim)
         self._cut_btn = QPushButton("Cut")
@@ -141,8 +161,9 @@ class PlayerWindow(QMainWindow):
         self._paste_btn.clicked.connect(self._on_paste)
         self._delete_btn = QPushButton("Delete")
         self._delete_btn.clicked.connect(self._on_delete)
-        edit_row.addWidget(self._in_btn)
-        edit_row.addWidget(self._out_btn)
+        edit_row.addWidget(self._sel_label)
+        edit_row.addWidget(self._select_all_btn)
+        edit_row.addWidget(self._deselect_btn)
         edit_row.addWidget(self._trim_btn)
         edit_row.addWidget(self._cut_btn)
         edit_row.addWidget(self._copy_btn)
@@ -166,13 +187,15 @@ class PlayerWindow(QMainWindow):
         root.addLayout(edit_row2)
 
         self.setCentralWidget(central)
+        for button in central.findChildren(QPushButton):
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.statusBar().showMessage("")
 
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (
             self._play_btn, self._stop_btn, self._step_btn,
-            self._in_btn, self._out_btn, self._trim_btn, self._cut_btn,
-            self._copy_btn, self._paste_btn, self._delete_btn,
+            self._select_all_btn, self._deselect_btn, self._trim_btn,
+            self._cut_btn, self._copy_btn, self._paste_btn, self._delete_btn,
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
         ):
             widget.setEnabled(enabled)
@@ -237,7 +260,7 @@ class PlayerWindow(QMainWindow):
         self._recording = recording
         self._keys = KeyStateTimeline(recording.events)
         self._clipboard = None
-        self._in_t = self._out_t = None
+        self._timeline_sel = None
         self._at_end = False
         self._playing = False
         self._play_btn.setText("▶ Play")
@@ -249,6 +272,8 @@ class PlayerWindow(QMainWindow):
             self._session.timeline.duration or recording.duration,
             [(m["t"], str(m.get("label", ""))) for m in recording.markers if "t" in m],
         )
+        self._timeline.clear_selection()
+        self._update_selection_label()
 
         self._keyboard_view.configure(self._keys.used_codes, (recording.width, recording.height))
         self._timer.setInterval(int(1000 / max(1.0, reader.fps)))
@@ -364,22 +389,38 @@ class PlayerWindow(QMainWindow):
     # ------------------------------------------------------------ editing
 
     def _selection(self) -> tuple[float, float] | None:
-        if self._in_t is None or self._out_t is None or self._in_t >= self._out_t:
+        if self._timeline_sel is None:
             return None
-        return self._in_t, self._out_t
+        return self._timeline_sel
 
-    def _set_boundary(self, which: str) -> None:
-        t = self._recording.snap_to_frame(self._current_t) if self._recording else self._current_t
-        if which == "in":
-            self._in_t = t
-            if self._out_t is not None and self._out_t <= t:
-                self._out_t = None
+    def _on_selection_changed(self, selection: tuple[float, float] | None) -> None:
+        if selection is None or self._recording is None:
+            self._timeline_sel = None
+            self._update_selection_label()
+            return
+        in_t, out_t = (self._recording.snap_to_frame(t) for t in selection)
+        self._timeline_sel = (in_t, out_t) if in_t < out_t else None
+        self._timeline.set_selection(self._timeline_sel)
+        self._update_selection_label()
+
+    def _update_selection_label(self) -> None:
+        if self._timeline_sel is None:
+            self._sel_label.setText("—")
         else:
-            self._out_t = t
-            if self._in_t is not None and self._in_t >= t:
-                self._in_t = None
-        self._timeline.set_selection(self._selection())
-        self._status(f"{which.upper()} = {_format_time(t)}")
+            in_t, out_t = self._timeline_sel
+            self._sel_label.setText(f"{_format_time(in_t)} – {_format_time(out_t)} ({out_t - in_t:.1f}s)")
+
+    def _on_select_all(self) -> None:
+        if self._session is None:
+            return
+        self._timeline_sel = (0.0, self._session.timeline.duration)
+        self._timeline.set_selection(self._timeline_sel)
+        self._update_selection_label()
+
+    def _on_deselect(self) -> None:
+        self._timeline_sel = None
+        self._timeline.clear_selection()
+        self._update_selection_label()
 
     def _refresh_timeline_view(self) -> None:
         self._timeline.set_model(
@@ -387,13 +428,12 @@ class PlayerWindow(QMainWindow):
             self._session.timeline.duration,
             [(m["t"], str(m.get("label", ""))) for m in self._recording.markers if "t" in m],
         )
-        self._timeline.set_selection(self._selection())
         self._update_time_label()
 
     def _on_trim(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Set In and Out first")
+            self._status("Select a region first (drag on the timeline)")
             return
         self._session.trim(*selection)
         self._after_edit(f"Trimmed to {_format_time(selection[0])}–{_format_time(selection[1])}")
@@ -401,7 +441,7 @@ class PlayerWindow(QMainWindow):
     def _on_cut(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Set In and Out first")
+            self._status("Select a region first (drag on the timeline)")
             return
         self._clipboard = self._session.cut(*selection)
         self._after_edit(f"Cut {_format_time(selection[1] - selection[0])}")
@@ -409,7 +449,7 @@ class PlayerWindow(QMainWindow):
     def _on_copy(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Set In and Out first")
+            self._status("Select a region first (drag on the timeline)")
             return
         self._clipboard = self._session.copy(*selection)
         self._status(f"Copied {_format_time(selection[1] - selection[0])}")
@@ -424,7 +464,7 @@ class PlayerWindow(QMainWindow):
     def _on_delete(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Set In and Out first")
+            self._status("Select a region first (drag on the timeline)")
             return
         self._session.delete(*selection)
         self._after_edit(f"Deleted {_format_time(selection[1] - selection[0])}")
@@ -443,6 +483,9 @@ class PlayerWindow(QMainWindow):
 
     def _after_edit(self, message: str) -> None:
         self._at_end = False
+        self._timeline_sel = None
+        self._timeline.clear_selection()
+        self._update_selection_label()
         self._refresh_timeline_view()
         self._status(message)
 

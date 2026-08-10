@@ -134,6 +134,9 @@ _GRID_PLACEMENT: list[tuple[int, int, int, int, str]] = [
     (4, 20, 1, 1, "Key1"), (4, 21, 1, 1, "Key2"), (4, 22, 1, 1, "Key3"),
     (4, 23, 1, 2, "Key.enter"),
     (5, 20, 2, 1, "Key0"), (5, 22, 1, 1, "Key."),
+    # mouse buttons (unified with the keyboard)
+    (6, 20, 1, 1, "button:left"), (6, 21, 1, 1, "button:right"),
+    (6, 22, 2, 1, "button:middle"),
 ]
 
 
@@ -160,7 +163,7 @@ class KeyCap(QLabel):
     def __init__(self, label: str) -> None:
         super().__init__(label)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumHeight(30)
+        self.setMinimumHeight(26)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.set_active(False)
 
@@ -224,7 +227,7 @@ class KeyboardView(QWidget):
         root.setSpacing(4)
 
         scroll = QScrollArea()
-        scroll.setWidgetResizable(False)
+        scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         host = QWidget()
@@ -234,7 +237,6 @@ class KeyboardView(QWidget):
             cap = KeyCap(_cap_label(code))
             self._caps.setdefault(code, []).append(cap)
             grid.addWidget(cap, row, col, rowspan, colspan)
-        host.setMinimumWidth(1100)
         scroll.setWidget(host)
         root.addWidget(scroll)
 
@@ -252,12 +254,6 @@ class KeyboardView(QWidget):
         root.addLayout(extras_row)
 
         mouse_row = QHBoxLayout()
-        for name in ("left", "right", "middle"):
-            cap = KeyCap(_BUTTON_LABELS[name])
-            cap.setMinimumWidth(64)
-            code = f"button:{name}"
-            self._caps.setdefault(code, []).append(cap)
-            mouse_row.addWidget(cap)
         self._mouse_surface = MouseSurface()
         self._mouse_label = QLabel("mouse: —")
         self._mouse_label.setStyleSheet("color: #888888;")

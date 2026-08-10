@@ -76,17 +76,119 @@ def test_reader_does_not_flood_queue(tmp_path):
 
 def test_edit_cut_undo_redo(window):
     original = window._session.timeline.duration
-    window._current_t = window._recording.snap_to_frame(0.3)
-    window._set_boundary("in")
-    window._current_t = window._recording.snap_to_frame(0.6)
-    window._set_boundary("out")
+    window._on_selection_changed((0.3, 0.6))
+    assert window._timeline_sel is not None
+    assert window._timeline_sel[0] == window._recording.snap_to_frame(0.3)
+    assert window._timeline_sel[1] == window._recording.snap_to_frame(0.6)
     window._on_cut()
     assert window._session.timeline.duration < original
     assert window._clipboard is not None
+    assert window._timeline_sel is None  # cleared after the edit
     window._on_undo()
     assert window._session.timeline.duration == original
     window._on_redo()
     assert window._session.timeline.duration < original
+
+
+def test_select_all_and_deselect(window):
+    window._on_select_all()
+    assert window._timeline_sel == (0.0, window._session.timeline.duration)
+    assert window._timeline._selection == window._timeline_sel
+    window._on_deselect()
+    assert window._timeline_sel is None
+    assert window._timeline._selection is None
+
+
+def test_timeline_drag_selects_region(window):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    timeline = window._timeline
+    timeline.resize(800, 100)
+    duration = window._session.timeline.duration
+    plot = timeline._plot_rect()
+
+    def pos_at(t):
+        x = plot.left() + (t / duration) * plot.width()
+        return QPointF(x, plot.center().y())
+
+    timeline.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress, pos_at(0.2), QPointF(),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    timeline.mouseMoveEvent(
+        QMouseEvent(
+            QEvent.Type.MouseMove, pos_at(0.7), QPointF(),
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    timeline.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease, pos_at(0.7), QPointF(),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    assert timeline._selection is not None
+    assert timeline._selection[0] == pytest.approx(0.2, abs=0.05)
+    assert timeline._selection[1] == pytest.approx(0.7, abs=0.05)
+    assert window._timeline_sel is not None
+    assert window._timeline_sel == timeline._selection
+
+
+def test_timeline_click_seeks_and_clears_selection(window):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    timeline = window._timeline
+    timeline.resize(800, 100)
+    duration = window._session.timeline.duration
+    plot = timeline._plot_rect()
+    seeks = []
+    timeline.seeked.connect(seeks.append)
+
+    window._on_select_all()
+    assert timeline._selection is not None
+
+    def pos_at(t):
+        x = plot.left() + (t / duration) * plot.width()
+        return QPointF(x, plot.center().y())
+
+    timeline.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress, pos_at(0.4), QPointF(),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    timeline.mouseReleaseEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease, pos_at(0.4), QPointF(),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    assert seeks
+    assert seeks[0] == pytest.approx(0.4, abs=0.05)
+    assert timeline._selection is None
+    assert window._timeline_sel is None
+
+
+def test_keyboard_mouse_buttons_unified(window):
+    view = window._keyboard_view
+    assert len(view._caps["button:left"]) == 1
+    assert len(view._caps["button:right"]) == 1
+    assert len(view._caps["button:middle"]) == 1
+    view.set_state(set(), {"left"}, None)
+    assert "#e74c3c" in view._caps["button:left"][0].styleSheet()
+    assert "#e74c3c" not in view._caps["button:right"][0].styleSheet()
+    view.set_state({"KeyW"}, {"left"}, (100, 50))
+    assert "#e74c3c" in view._caps["KeyW"][0].styleSheet()
+    assert view._mouse_label.text() == "mouse: x=100  y=50"
 
 
 def test_save_creates_new_recording(window, tmp_path, monkeypatch):

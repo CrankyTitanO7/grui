@@ -60,6 +60,7 @@ class PlayerWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Recording Player")
         self.resize(1100, 840)
+        self.setMinimumWidth(760)
         self._root = Path(recordings_root) if recordings_root else RecorderConfig().output_dir
         self._recording: RecordingData | None = None
         self._reader: VideoReader | None = None
@@ -117,7 +118,7 @@ class PlayerWindow(QMainWindow):
 
         self._video_label = QLabel("No recording loaded")
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video_label.setMinimumHeight(320)
+        self._video_label.setMinimumHeight(240)
         self._video_label.setStyleSheet("background: #101010; color: #666; border-radius: 6px;")
         root.addWidget(self._video_label, 1)
 
@@ -430,10 +431,17 @@ class PlayerWindow(QMainWindow):
         )
         self._update_time_label()
 
+    def _warn_no_selection(self) -> None:
+        QMessageBox.warning(
+            self,
+            "No Selection",
+            "Select a region first — drag on the timeline, or use Select All (Ctrl+A).",
+        )
+
     def _on_trim(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Select a region first (drag on the timeline)")
+            self._warn_no_selection()
             return
         self._session.trim(*selection)
         self._after_edit(f"Trimmed to {_format_time(selection[0])}–{_format_time(selection[1])}")
@@ -441,7 +449,7 @@ class PlayerWindow(QMainWindow):
     def _on_cut(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Select a region first (drag on the timeline)")
+            self._warn_no_selection()
             return
         self._clipboard = self._session.cut(*selection)
         self._after_edit(f"Cut {_format_time(selection[1] - selection[0])}")
@@ -449,7 +457,7 @@ class PlayerWindow(QMainWindow):
     def _on_copy(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Select a region first (drag on the timeline)")
+            self._warn_no_selection()
             return
         self._clipboard = self._session.copy(*selection)
         self._status(f"Copied {_format_time(selection[1] - selection[0])}")
@@ -464,7 +472,7 @@ class PlayerWindow(QMainWindow):
     def _on_delete(self) -> None:
         selection = self._selection()
         if not selection:
-            self._status("Select a region first (drag on the timeline)")
+            self._warn_no_selection()
             return
         self._session.delete(*selection)
         self._after_edit(f"Deleted {_format_time(selection[1] - selection[0])}")

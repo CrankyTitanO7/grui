@@ -1,10 +1,10 @@
 """Live full-keyboard/mouse state view for the player.
 
-Shows the complete keyboard (function row, numbers, QWERTY, modifiers, nav
-cluster, arrows, numpad) plus mouse buttons, a mini pointer surface and the
-cursor position. Keycaps light up while the corresponding key or button is
-held; unknown keys found in a recording (e.g. ``Key.vk_192``) get dynamic
-caps in the "Other keys" row.
+The keyboard and mouse live in separate titled areas (boxes): the keyboard
+shows the complete layout (function row, numbers, QWERTY, modifiers, nav
+cluster, arrows, numpad) plus dynamic caps for unknown keys; the mouse box
+shows the button keys and a mini screen with the pointer position. Keycaps
+shrink/expand with the window so the whole keyboard fits at once.
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ from typing import Mapping
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -163,7 +165,11 @@ class KeyCap(QLabel):
     def __init__(self, label: str) -> None:
         super().__init__(label)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumHeight(26)
+        font = self.font()
+        font.setPointSize(8)
+        self.setFont(font)
+        self.setMinimumHeight(22)
+        self.setMinimumWidth(24)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.set_active(False)
 
@@ -176,8 +182,8 @@ class MouseSurface(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(64)
-        self.setMinimumWidth(180)
+        self.setMinimumHeight(56)
+        self.setMinimumWidth(240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._screen_w = 1920.0
         self._screen_h = 1080.0
@@ -224,42 +230,51 @@ class KeyboardView(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
+        root.setSpacing(6)
+
+        self._keyboard_group = QGroupBox("Keyboard")
+        kb_layout = QVBoxLayout(self._keyboard_group)
+        kb_layout.setContentsMargins(8, 4, 8, 6)
+        kb_layout.setSpacing(4)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         host = QWidget()
-        grid = QGridLayout(host)
-        grid.setSpacing(4)
+        self._grid = QGridLayout(host)
+        self._grid.setSpacing(4)
+        self._grid.setContentsMargins(0, 0, 0, 0)
         for row, col, colspan, rowspan, code in _GRID_PLACEMENT:
             cap = KeyCap(_cap_label(code))
             self._caps.setdefault(code, []).append(cap)
-            grid.addWidget(cap, row, col, rowspan, colspan)
+            self._grid.addWidget(cap, row, col, rowspan, colspan)
         scroll.setWidget(host)
-        root.addWidget(scroll)
+        kb_layout.addWidget(scroll)
+        kb_layout.addStretch(1)
 
         extras_row = QHBoxLayout()
         extras_row.addWidget(QLabel("Other keys:"))
         self._extras_area = QScrollArea()
         self._extras_area.setWidgetResizable(True)
-        self._extras_area.setFixedHeight(44)
+        self._extras_area.setFixedHeight(36)
         self._extras_host = QWidget()
         self._extras_layout = QHBoxLayout(self._extras_host)
         self._extras_layout.setContentsMargins(0, 0, 0, 0)
         self._extras_layout.setSpacing(4)
         self._extras_area.setWidget(self._extras_host)
         extras_row.addWidget(self._extras_area, 1)
-        root.addLayout(extras_row)
+        kb_layout.addLayout(extras_row)
+        root.addWidget(self._keyboard_group)
 
-        mouse_row = QHBoxLayout()
+        self._mouse_group = QGroupBox("Mouse")
+        mouse_layout = QVBoxLayout(self._mouse_group)
+        mouse_layout.setContentsMargins(8, 4, 8, 6)
+        mouse_layout.setSpacing(4)
         self._mouse_surface = MouseSurface()
-        self._mouse_label = QLabel("mouse: —")
-        self._mouse_label.setStyleSheet("color: #888888;")
-        mouse_row.addWidget(self._mouse_surface, 1)
-        mouse_row.addWidget(self._mouse_label)
-        root.addLayout(mouse_row)
+        mouse_layout.addWidget(self._mouse_surface)
+        root.addWidget(self._mouse_group)
 
     # ------------------------------------------------------------ config
 
@@ -298,7 +313,3 @@ class KeyboardView(QWidget):
             for cap in caps:
                 cap.set_active(lit)
         self._mouse_surface.set_pos(mouse_pos)
-        if mouse_pos is None:
-            self._mouse_label.setText("mouse: —")
-        else:
-            self._mouse_label.setText(f"mouse: x={mouse_pos[0]}  y={mouse_pos[1]}")

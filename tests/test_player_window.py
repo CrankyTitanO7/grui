@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from app.ui.keyboard_view import _GRID_PLACEMENT
 from app.ui.player_window import PlayerWindow
 from storage.recording import list_recordings, load_recording
 from tests.fakes import build_synthetic_recording
@@ -188,7 +189,43 @@ def test_keyboard_mouse_buttons_unified(window):
     assert "#e74c3c" not in view._caps["button:right"][0].styleSheet()
     view.set_state({"KeyW"}, {"left"}, (100, 50))
     assert "#e74c3c" in view._caps["KeyW"][0].styleSheet()
-    assert view._mouse_label.text() == "mouse: x=100  y=50"
+    assert view._mouse_surface._pos == (100.0, 50.0)
+
+
+def test_keyboard_and_mouse_areas(window):
+    from PySide6.QtWidgets import QGroupBox, QScrollArea
+
+    view = window._keyboard_view
+    groups = view.findChildren(QGroupBox)
+    assert [group.title() for group in groups] == ["Keyboard", "Mouse"]
+    assert view._keyboard_group.findChild(QScrollArea) is not None
+    assert view._mouse_surface.parent() is view._mouse_group
+
+
+def test_keyboard_fits_at_once(window):
+    view = window._keyboard_view
+    min_width = view._grid.minimumSize().width()
+    assert min_width < 700
+    assert window.minimumWidth() >= min_width
+    # every physical key + mouse button has a cap in the grid
+    grid_codes = {code for _, _, _, _, code in _GRID_PLACEMENT}
+    for code in grid_codes:
+        assert code in view._caps
+
+
+def test_no_selection_warns(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *args, **kwargs: warnings.append(args))
+    )
+    window._on_cut()
+    window._on_trim()
+    window._on_copy()
+    window._on_delete()
+    assert len(warnings) == 4
+    assert all(args[1] == "No Selection" for args in warnings)
 
 
 def test_save_creates_new_recording(window, tmp_path, monkeypatch):

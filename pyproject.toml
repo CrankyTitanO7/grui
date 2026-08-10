@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "imitate"
+name = "grui"
 version = "0.1.0"
-description = "General-purpose imitation-learning demonstration recorder: captures screen and input into timestamped raw demonstrations."
+description = "GRUI (Grand Unified Imitation): captures screen and input into timestamped raw demonstrations."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "imitate contributors" }]
+authors = [{ name = "grui contributors" }]
 dependencies = [
     "PySide6>=6.6",
     "mss>=9.0",
@@ -24,7 +24,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-imitate = "app.main:main"
+grui = "app.main:main"
 
 [tool.setuptools.packages.find]
 include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*"]

@@ -1,4 +1,4 @@
-"""Main application window for the Imitation Recorder.
+"""Main application window for GRUI (Grand Unified Imitation).
 
 Controls: monitor selection, FPS, Start/Stop, quick annotations and global
 hotkeys (F8 stop, F9 marker, F10 pause/resume). Session start/stop run on a
@@ -80,7 +80,7 @@ class SessionWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Imitation Recorder")
+        self.setWindowTitle("GRUI — Grand Unified Imitation")
         self.setMinimumWidth(380)
         self._session: RecordingSession | None = None
         self._worker: SessionWorker | None = None
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
     def _on_stopped(self, ok: bool, error: str) -> None:
         if not ok:
             logger.error("stop failed: %s", error)
-            QMessageBox.warning(self, "Imitation Recorder", f"Failed to stop recording cleanly:\n{error}")
+            QMessageBox.warning(self, "GRUI", f"Failed to stop recording cleanly:\n{error}")
 
     def _run_worker(self, fn, on_done) -> None:
         worker = SessionWorker(fn, self)
@@ -262,7 +262,7 @@ class MainWindow(QMainWindow):
             logger.info("annotation %r recorded at t=%.3f", label, t)
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to add annotation")
-            QMessageBox.warning(self, "Imitation Recorder", f"Could not add annotation: {exc}")
+            QMessageBox.warning(self, "GRUI", f"Could not add annotation: {exc}")
 
     def _prompt_annotation(self) -> None:
         text, ok = QInputDialog.getText(

@@ -1,4 +1,4 @@
-"""Application entry point for the Imitation Recorder."""
+"""Application entry point for GRUI (Grand Unified Imitation)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logging.basicConfig(
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Imitation Recorder")
+    app.setApplicationName("GRUI")
     window = MainWindow()
     window.show()
     app.aboutToQuit.connect(window.shutdown)

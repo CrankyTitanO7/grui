@@ -1,12 +1,11 @@
-# imitate — General-Purpose Imitation-Learning Recorder
-
-
+# grui — Grand Unified Imitation
 
 Capture a user's screen and keyboard/mouse actions while they interact with
 **arbitrary software** — no source code, engine, API or backend access
 required. Output is a versioned, timestamped **raw demonstration** that a
 separate dataset builder can later convert into temporally aligned training
-examples. The recorder itself is ML-agnostic.
+examples. The recorder itself is ML-agnostic, and the built-in player can
+replay, inspect and edit any recording.
 
 ## full ai disclosure
 **made entirely with AI**

@@ -235,26 +235,26 @@ class PlayerWindow(QMainWindow):
             recording = load_recording(path)
         except Exception as exc:  # noqa: BLE001
             logger.exception("failed to load recording")
-            QMessageBox.warning(self, "Imitation Recorder", f"Could not load recording:\n{exc}")
+            QMessageBox.warning(self, "GRUI", f"Could not load recording:\n{exc}")
             return
 
         if not recording.video_path.exists():
-            QMessageBox.warning(self, "Imitation Recorder", "Recording has no video file.")
+            QMessageBox.warning(self, "GRUI", "Recording has no video file.")
             return
 
         reader = VideoReader(recording.video_path)
         reader.start()
         if not reader.wait_ready(timeout=5.0):
             reader.stop()
-            QMessageBox.warning(self, "Imitation Recorder", "Timed out opening video.")
+            QMessageBox.warning(self, "GRUI", "Timed out opening video.")
             return
         if reader.error:
-            QMessageBox.warning(self, "Imitation Recorder", f"Video error: {reader.error}")
+            QMessageBox.warning(self, "GRUI", f"Video error: {reader.error}")
             reader.stop()
             return
         if reader.width <= 0:
             reader.stop()
-            QMessageBox.warning(self, "Imitation Recorder", "Video has no frames.")
+            QMessageBox.warning(self, "GRUI", "Video has no frames.")
             return
 
         self._reader = reader
@@ -534,7 +534,7 @@ class PlayerWindow(QMainWindow):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("export failed")
-            QMessageBox.warning(self, "Imitation Recorder", f"Export failed:\n{exc}")
+            QMessageBox.warning(self, "GRUI", f"Export failed:\n{exc}")
             return
         self._refresh_recording_list()
         self._status(f"Saved to {saved.directory}")

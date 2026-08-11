@@ -64,10 +64,11 @@ def _sample_times(t0: float, t1: float, stride: float) -> list[float]:
 
 def _observation_indices(recording: RecordingData, t: float, config: DatasetConfig) -> list[int]:
     """Nearest frame indices covering ``[t - duration, t]`` at ``config.fps``."""
-    n_obs = int(round(config.observation_duration * config.fps))
+    n_obs = max(1, int(round(config.observation_duration * config.fps)))
+    step = config.observation_duration / n_obs
     indices = []
     for k in range(n_obs + 1):
-        tau = t - config.observation_duration + k / config.fps
+        tau = t - config.observation_duration + k * step
         indices.append(recording.nearest_frame_index(tau))
     return indices
 

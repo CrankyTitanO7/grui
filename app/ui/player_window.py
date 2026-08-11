@@ -3,7 +3,8 @@
 Loading a recording opens it read-only. Drag on the timeline to select a
 region (click to seek); Cut/Copy/Paste/Delete/Trim act on the selection.
 Undo/redo and keyboard shortcuts are supported. Saving exports a new raw
-recording (original untouched).
+recording (original untouched); Build Dataset generates observation->action
+training samples from the loaded recording.
 """
 
 from __future__ import annotations
@@ -181,10 +182,13 @@ class PlayerWindow(QMainWindow):
         self._reset_btn.clicked.connect(self._on_reset)
         self._save_btn = QPushButton("Save Edits as New Recording…")
         self._save_btn.clicked.connect(self._on_save)
+        self._dataset_btn = QPushButton("Build Dataset…")
+        self._dataset_btn.clicked.connect(self._on_build_dataset)
         edit_row2.addWidget(self._undo_btn)
         edit_row2.addWidget(self._redo_btn)
         edit_row2.addWidget(self._reset_btn)
         edit_row2.addWidget(self._save_btn, 1)
+        edit_row2.addWidget(self._dataset_btn)
         root.addLayout(edit_row2)
 
         self.setCentralWidget(central)
@@ -198,6 +202,7 @@ class PlayerWindow(QMainWindow):
             self._select_all_btn, self._deselect_btn, self._trim_btn,
             self._cut_btn, self._copy_btn, self._paste_btn, self._delete_btn,
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
+            self._dataset_btn,
         ):
             widget.setEnabled(enabled)
 
@@ -540,6 +545,13 @@ class PlayerWindow(QMainWindow):
         self._status(f"Saved to {saved.directory}")
 
     # ------------------------------------------------------------ shutdown
+
+    def _on_build_dataset(self) -> None:
+        if self._recording is None:
+            return
+        from app.ui.dataset_dialog import DatasetDialog
+
+        DatasetDialog(self._recording, self).exec()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._teardown_reader()

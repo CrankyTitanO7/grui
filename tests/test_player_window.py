@@ -312,3 +312,43 @@ def test_save_cancel_does_nothing(window, tmp_path, monkeypatch):
     )
     window._on_save()
     assert list_recordings(tmp_path / "root") == before
+
+
+def test_dataset_button_requires_loaded_recording(tmp_path):
+    win = PlayerWindow(recordings_root=str(tmp_path / "root"))
+    assert not win._dataset_btn.isEnabled()
+    win.close()
+
+
+def test_dataset_button_opens_dialog(window, monkeypatch):
+    from app.ui import dataset_dialog as module
+
+    opened = []
+    monkeypatch.setattr(module.DatasetDialog, "exec", lambda self: opened.append(self) or 0)
+    window._dataset_btn.click()
+    assert len(opened) == 1
+    assert opened[0].recording is window._recording
+
+
+def test_dataset_dialog_builds_dataset(window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from app.ui.dataset_dialog import DatasetDialog
+
+    dialog = DatasetDialog(window._recording)
+    dialog._duration.setValue(0.2)
+    dialog._fps.setValue(5)
+    dialog._stride.setValue(0.1)
+    out = tmp_path / "ds"
+    dialog._out_edit.setText(str(out))
+
+    messages = []
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *args, **kwargs: messages.append(args))
+    )
+    dialog._on_build()
+    assert messages, "success message shown"
+    assert (out / "manifest.json").exists()
+    assert (out / "samples.jsonl").exists()
+    assert len(list((out / "frames").glob("frame_*.png"))) > 0
+    assert dialog.result() == QDialog.DialogCode.Accepted  # accepted after success
+

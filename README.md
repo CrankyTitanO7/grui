@@ -65,6 +65,20 @@ grui dataset build <recording_dir> --out ./dataset
 See `grui dataset build --help` for the observation window, FPS, stride and
 prediction-horizon options; `dataset/README.md` documents the output format.
 
+## Training & agents
+
+Train a behavior-cloning policy on one or more datasets and run it:
+
+```bash
+pip install -e ".[ml]"                 # torch extra
+grui train --dataset ./dataset --out ckpt.pt --epochs 10
+grui agent --checkpoint ckpt.pt --dataset ./dataset                 # dry run
+grui agent --checkpoint ckpt.pt --dataset ./dataset --inject        # presses keys / moves mouse
+```
+
+The policy is a CNN + GRU: observation window -> held keys, held mouse
+buttons, and pointer velocity. See `ml/README.md` for details.
+
 ## Player & editor
 
 Click **Open Player** in the main window to browse saved recordings:
@@ -228,4 +242,4 @@ excluded from tests.
 - [ ] Window/region capture; overlay-region exclusion
 - [ ] Excluded-application list (privacy)
 - [x] Dataset builder: `grui dataset build <recording>` (observation->action samples, CLI)
-- [ ] PyTorch dataset/agent (later milestone)
+- [x] PyTorch dataset/agent: `grui train` (CNN+GRU behavior cloning) and `grui agent` (dry run or pynput injection)

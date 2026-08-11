@@ -43,6 +43,9 @@ def test_build_dataset_sync_and_actions(recording, tmp_path):
     assert manifest["screen"] == {"width": recording.width, "height": recording.height}
     assert manifest["time_base"] == "seconds since session start"
 
+    vocab = json.loads((out / "vocab.json").read_text(encoding="utf-8"))
+    assert vocab == {"keys": ["KeyW"], "buttons": ["left"]}
+
     t0 = float(recording.frame_times[0])
     t1 = recording.duration
     expected_first = t0 + 0.2
@@ -110,6 +113,7 @@ def test_build_dataset_is_deterministic(recording, tmp_path):
     assert (second / "samples.jsonl").read_bytes() == (first / "samples.jsonl").read_bytes()
     assert (second / "manifest.json").read_bytes() == (first / "manifest.json").read_bytes()
     assert (second / "frames.jsonl").read_bytes() == (first / "frames.jsonl").read_bytes()
+    assert (second / "vocab.json").read_bytes() == (first / "vocab.json").read_bytes()
     assert sorted(p.name for p in (second / "frames").iterdir()) == sorted(
         p.name for p in (first / "frames").iterdir()
     )

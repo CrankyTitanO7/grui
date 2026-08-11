@@ -22,15 +22,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+ml = ["torch>=2.0"]
 
 [project.scripts]
 grui = "app.main:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*"]
+include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*", "ml*"]
 
 [tool.setuptools.package-data]
 dataset = ["README.md"]
+ml = ["README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

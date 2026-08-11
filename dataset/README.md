@@ -23,6 +23,7 @@ recordings/2026-08-08_22-51-03_<session-id>/
 ```
 <out>/
     manifest.json   # format version, source session, config, counts
+    vocab.json      # sorted key/button codes that appear in the actions
     frames.jsonl    # frame_index -> t -> frames/frame_<index>.png
     frames/         # one PNG per observation frame (shared across samples)
     samples.jsonl   # one JSON record per sample

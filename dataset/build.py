@@ -178,6 +178,13 @@ def build_dataset(
     for index, frame in frames.items():
         cv2.imwrite(str(frames_dir / f"frame_{index}.png"), frame)
 
+    all_keys = sorted({code for sample in samples for code in sample["action"]["keys"]})
+    all_buttons = sorted({code for sample in samples for code in sample["action"]["buttons"]})
+    (out_dir / "vocab.json").write_text(
+        json.dumps({"keys": all_keys, "buttons": all_buttons}, indent=2),
+        encoding="utf-8",
+    )
+
     (out_dir / "manifest.json").write_text(
         json.dumps(
             {

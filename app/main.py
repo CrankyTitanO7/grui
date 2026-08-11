@@ -16,10 +16,15 @@ logging.basicConfig(
 
 
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "dataset":
-        from dataset.cli import run as dataset_cli
+    if len(sys.argv) > 1 and sys.argv[1] in ("dataset", "train", "agent"):
+        if sys.argv[1] == "dataset":
+            from dataset.cli import run as cli
+        elif sys.argv[1] == "train":
+            from ml.train import main as cli
+        else:
+            from ml.inject import run_agent as cli
 
-        return dataset_cli(sys.argv[2:])
+        return cli(sys.argv[2:])
 
     app = QApplication(sys.argv)
     app.setApplicationName("GRUI")

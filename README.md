@@ -7,6 +7,8 @@ separate dataset builder can later convert into temporally aligned training
 examples. The recorder itself is ML-agnostic, and the built-in player can
 replay, inspect and edit any recording.
 
+https://github.com/user-attachments/assets/f6f66744-f462-42c9-a858-bea349844b9b
+
 ## full ai disclosure
 **made entirely with AI**
 
@@ -14,14 +16,15 @@ now I had the idea, and I wanted to see if it would really work, so I asked chat
 
 Then I "guided" the idea using constructive criticism. I encourage someone with real capabilities to re-build this app, fork the repo, etc. I just want this app out there. I had the idea, and now you can see it too.
 
+All media and testing, ideas, screencaptures, etc were done by me; only the code done by ai.
+
 ## Status
 
 Milestone 1: reliably record screen + input into a portable raw
 demonstration. Milestone 2: playback and editing — load any recording,
 watch the video with live key/mouse state, cut/copy/paste/trim/delete
 timeline clips with undo/redo, and save as a new recording (the original
-is never modified). The dataset builder and ML training remain out of
-scope for now.
+is never modified).
 
 ## Quickstart
 

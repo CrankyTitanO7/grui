@@ -1,1 +1,1 @@
-"""imitate application package (PySide6 UI)."""
+"""GRUI application package (PySide6 UI)."""

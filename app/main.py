@@ -16,6 +16,11 @@ logging.basicConfig(
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "dataset":
+        from dataset.cli import run as dataset_cli
+
+        return dataset_cli(sys.argv[2:])
+
     app = QApplication(sys.argv)
     app.setApplicationName("GRUI")
     window = MainWindow()

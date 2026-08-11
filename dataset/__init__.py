@@ -1,8 +1,9 @@
-"""Dataset generation (future).
+"""Dataset generation: raw recordings -> temporally aligned samples.
 
 The recorder deliberately produces raw demonstrations, not ML samples. This
-package is reserved for the future dataset builder that converts a raw
-recording into temporally aligned observation->action samples, e.g.::
+package converts a raw recording into observation->action samples with
+configurable parameters (not stored in the raw format, so the same recording
+can generate many different datasets)::
 
     observation:
         duration: 3.0
@@ -14,7 +15,9 @@ recording into temporally aligned observation->action samples, e.g.::
     prediction:
         horizon: 0.2
 
-The observation window, stride, FPS and prediction horizon are dataset-
-generation parameters and are NOT stored in the recorder's raw format, so
-the same recording can generate many different datasets.
+Usage: ``grui dataset build <recording_dir>`` (see ``--help`` for options).
 """
+
+from dataset.build import DatasetConfig, build_dataset
+
+__all__ = ["DatasetConfig", "build_dataset"]

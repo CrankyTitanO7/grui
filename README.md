@@ -32,7 +32,7 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e .        # Windows
 source .venv/bin/pip install -e .       # macOS/Linux
 
-imitate                                 # or: python -m app.main
+grui                                    # or: python -m app.main
 ```
 
 FFmpeg is used for encoding. `imageio-ffmpeg` (a dependency) bundles a
@@ -53,6 +53,17 @@ binary automatically; alternatively make `ffmpeg` available on `PATH`.
 | F8     | Stop recording |
 | F9     | Add annotation |
 | F10    | Pause/Resume   |
+
+## Dataset builder
+
+Convert any recording into temporally aligned observation->action samples:
+
+```bash
+grui dataset build <recording_dir> --out ./dataset
+```
+
+See `grui dataset build --help` for the observation window, FPS, stride and
+prediction-horizon options; `dataset/README.md` documents the output format.
 
 ## Player & editor
 
@@ -216,5 +227,5 @@ excluded from tests.
 - [x] Player + editor (live key view, timeline, cut/copy/paste/trim, undo/redo, save as new recording)
 - [ ] Window/region capture; overlay-region exclusion
 - [ ] Excluded-application list (privacy)
-- [ ] Dataset builder: `imitate dataset build <recording>`
+- [x] Dataset builder: `grui dataset build <recording>` (observation->action samples, CLI)
 - [ ] PyTorch dataset/agent (later milestone)

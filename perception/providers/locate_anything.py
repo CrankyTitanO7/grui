@@ -84,6 +84,10 @@ class LocateAnythingProvider:
         """Import-level availability check; never instantiates the model."""
         return _backend_importable()
 
+    def prepare(self) -> None:
+        """Load the model backend up front (downloads weights on first use)."""
+        self._load()
+
     def with_options(self, **options: Any) -> "LocateAnythingProvider":
         """Reconfigure (e.g. ``device="cuda:1"``); returns a new instance."""
         device = options.get("device")

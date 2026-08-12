@@ -242,6 +242,50 @@ def test_analyze_requires_frames_and_video(recording, fake_provider):
         analyze_recording(recording, fake_provider, ["boss"], every=10)
 
 
+def test_prepare_failure_leaves_no_artifacts(recording, tmp_path):
+    class PrepareFailsProvider(FakePerceptionProvider):
+        def prepare(self) -> None:
+            raise RuntimeError("model download failed")
+
+    provider = PrepareFailsProvider()
+    with pytest.raises(RuntimeError, match="model download failed"):
+        analyze_recording(recording, provider, ["boss"], every=10)
+    assert not (recording.directory / "perception").exists()
+
+
+def test_prepare_called_before_analyze(recording):
+    class PreparedProvider(FakePerceptionProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared = 0
+
+        def prepare(self) -> None:
+            self.prepared += 1
+
+    provider = PreparedProvider()
+    analyze_recording(recording, provider, ["boss"], every=10)
+    assert provider.prepared == 1
+    assert provider.calls > 0
+
+
+def test_failed_rerun_preserves_previous_results(recording, fake_provider):
+    good = analyze_recording(recording, fake_provider, ["boss"], every=10)
+    snapshot = good.results_path.read_bytes()
+
+    class CrashProvider(FakePerceptionProvider):
+        def analyze(self, frame, prompts):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("CUDA out of memory")
+            return super().analyze(frame, prompts)
+
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        analyze_recording(recording, CrashProvider(), ["boss"], every=10, force=True)
+    assert good.results_path.read_bytes() == snapshot  # previous run intact
+    assert not (recording.directory / "perception" / "results.jsonl.tmp").exists()
+    assert not (recording.directory / "perception" / "manifest.json.tmp").exists()
+
+
 # --------------------------------------------- missing optional dependency
 
 def test_locate_anything_missing_dependency(monkeypatch, recording):

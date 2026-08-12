@@ -104,8 +104,18 @@ provider: natural-language prompts are grounded in recorded frames (e.g.
 Install the optional LocateAnything dependency stack:
 
 ```bash
-pip install -e ".[locate]"
+uv pip install -e ".[locate]"       # uv is recommended
+# or: pip install -e ".[locate]"
 ```
+
+`locate-anything` expects `torch` built for your CUDA (install it from the
+PyTorch index if you don't have it). It also pins `numpy==2.0.2` and
+`Pillow==11.1.0`, which have no Python 3.14 / Windows wheels — this repo
+relaxes them via `[tool.uv] override-dependencies`, which uv picks up
+automatically. Plain pip cannot override transitive pins: on
+Python 3.14/Windows use uv, or install with
+`pip install --no-deps locate-anything` plus a manually resolved stack, or
+use Python 3.12/3.13 where the pins have wheels.
 
 Analyze a recording (sampling ~2 frames per second):
 

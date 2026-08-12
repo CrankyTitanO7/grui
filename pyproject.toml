@@ -28,6 +28,13 @@ ml = ["torch>=2.0"]
 # required) and needs a CUDA GPU; check its license before commercial use.
 locate = ["locate-anything>=0.1.0"]
 
+# locate-anything 0.1.0 pins numpy==2.0.2 and Pillow==11.1.0, which have no
+# Python 3.14 Windows wheels (and no compiler on most Windows setups), so the
+# [locate] extra can't be installed there without these overrides. numpy 2.x
+# and Pillow 12.x are fine for the whole stack (torch/transformers support them).
+[tool.uv]
+override-dependencies = ["numpy>=2.1", "Pillow>=11.2"]
+
 [project.scripts]
 grui = "app.main:main"
 

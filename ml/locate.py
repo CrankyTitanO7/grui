@@ -57,7 +57,7 @@ class PipLocator(Locator):
                 f"task {task!r} needs the full LocateAnythingWorker "
                 "(add the Eagle repo's locateanything_worker.py to PYTHONPATH)"
             )
-        result = self._client.detect(image, categories=[prompt])
+        result = self._client.detect(image, categories=[prompt], draw=False)
         boxes = [
             {"x1": float(d["bbox_pixels"][0]), "y1": float(d["bbox_pixels"][1]),
              "x2": float(d["bbox_pixels"][2]), "y2": float(d["bbox_pixels"][3])}
@@ -99,16 +99,18 @@ def load_locator(device: str = "cuda") -> Locator:
     """Load a LocateAnything backend. Raises ``RuntimeError`` with setup hints."""
     try:
         from locate_anything import LocateAnything
-
-        return PipLocator(LocateAnything(device=device))
-    except ImportError:
+    except ImportError:  # backend not installed; try the next one
         pass
+    else:
+        # the PyPI wrapper picks the best device itself (device_map="auto");
+        # it has no `device` kwarg, so nothing is passed here.
+        return PipLocator(LocateAnything())
     try:
         from locateanything_worker import LocateAnythingWorker
-
-        return WorkerLocator(LocateAnythingWorker("nvidia/LocateAnything-3B", device=device))
     except ImportError:
         pass
+    else:
+        return WorkerLocator(LocateAnythingWorker("nvidia/LocateAnything-3B", device=device))
     raise RuntimeError(
         "LocateAnything is not installed.\n"
         "  pip install \"grui[locate]\"        # PyPI wrapper (detect task)\n"

@@ -204,6 +204,11 @@ def analyze_recording(
 
     out = CachedAnalysis(Path(out_dir) if out_dir else recording.directory / "perception")
     expected_count = len(indices) * len(prompts)  # one record per (frame, prompt)
+    for stale in (out.directory / "results.jsonl.tmp", out.directory / "manifest.json.tmp"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     if not force:
         existing = out.read_manifest()
         wanted = _manifest(recording, provider, sampling, prompts, expected_count)
@@ -217,30 +222,54 @@ def analyze_recording(
             f"Install its optional dependencies first (see the provider's docs)."
         )
 
+    # Load the model (download weights on first use) BEFORE creating any
+    # artifacts, so a slow or failing load never leaves a partial run behind.
+    prepare = getattr(provider, "prepare", None)
+    if callable(prepare):
+        prepare()
+    log(f"analyzing {len(indices)} frames x {len(prompts)} prompts with {provider.name!r}…")
+
     out.directory.mkdir(parents=True, exist_ok=True)
-    frames = _decode_frames(recording.video_path, indices)
+    tmp_results = out.results_path.with_name("results.jsonl.tmp")
+    tmp_manifest = out.manifest_path.with_name("manifest.json.tmp")
     started = time.monotonic()
-    records: list[PerceptionResult] = []
-    with out.results_path.open("w", encoding="utf-8") as fh:
-        for index in sorted(frames):
-            frame = frames[index]
-            for prompt in prompts:
-                detections = provider.analyze(frame, [prompt])
-                result = PerceptionResult(
-                    frame_index=index,
-                    t=float(recording.frame_time(index)),
-                    prompt=prompt,
-                    detections=list(detections),
-                )
-                fh.write(json.dumps(result.to_dict()) + "\n")
-                records.append(result)
-    manifest = _manifest(recording, provider, sampling, prompts, expected_count)
-    out.manifest_path.write_text(
-        json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    records = 0
+    try:
+        frames = _decode_frames(recording.video_path, indices)
+        with tmp_results.open("w", encoding="utf-8") as fh:
+            for index in sorted(frames):
+                frame = frames[index]
+                for prompt in prompts:
+                    detections = provider.analyze(frame, [prompt])
+                    result = PerceptionResult(
+                        frame_index=index,
+                        t=float(recording.frame_time(index)),
+                        prompt=prompt,
+                        detections=list(detections),
+                    )
+                    fh.write(json.dumps(result.to_dict()) + "\n")
+                    records += 1
+        manifest = _manifest(recording, provider, sampling, prompts, expected_count)
+        tmp_manifest.write_text(
+            json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        tmp_results.replace(out.results_path)
+        tmp_manifest.replace(out.manifest_path)
+    except BaseException:
+        for tmp in (tmp_results, tmp_manifest):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        if records == 0 and not out.exists:
+            try:
+                out.directory.rmdir()  # remove the empty dir we just created
+            except OSError:
+                pass
+        raise
     log(
         f"analyzed {len(frames)} frames x {len(prompts)} prompts "
-        f"({len(records)} records) -> {out.results_path} "
+        f"({records} records) -> {out.results_path} "
         f"({time.monotonic() - started:.1f}s)"
     )
     return out

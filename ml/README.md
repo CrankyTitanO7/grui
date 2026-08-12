@@ -12,6 +12,7 @@ pip install -e ".[ml]"        # or uv pip install -e ".[ml]"
 grui train --dataset <dataset_dir> [--dataset <more...>] --out ckpt.pt \
            [--epochs 5] [--batch-size 16] [--lr 1e-3] [--hidden 128] \
            [--resize 160x120] [--seed 0] [--device auto] \
+           [--val-fraction 0.2] [--early-stop 5] \
            [--metrics PATH] [--no-progress]
 ```
 
@@ -23,6 +24,12 @@ grui train --dataset <dataset_dir> [--dataset <more...>] --out ckpt.pt \
   Use `--resize WxH` when the recordings have different screen resolutions.
 * Loss: BCE-with-logits on keys and buttons, MSE on `dx`/`dy` (masked to
   samples where the pointer position is known).
+* Validation: by default `--val-fraction 0.2` holds out 20% of each dataset
+  (seeded, reproducible) for a per-epoch eval pass — `val_loss` and the
+  `val_*` metrics let you spot overfitting. Use `--val-fraction 0` to train
+  on everything, or `--val-dataset DIR` (repeatable) to validate on separate
+  recordings. `--early-stop N` stops when `val_loss` has not improved for `N`
+  consecutive epochs.
 * The checkpoint (`.pt`) stores weights, the exact vocabulary, the
   architecture and the training config.
 
@@ -43,7 +50,8 @@ While training runs you get two views:
   ```
 
   Each epoch record: `event=epoch, epoch, loss, key_acc, button_acc,
-  dx_mae, dy_mae, samples, elapsed_s`.
+  dx_mae, dy_mae, samples, elapsed_s` plus `val_loss` and `val_*` metrics
+  when validation is enabled.
 
 ## Run the agent
 

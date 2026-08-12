@@ -126,22 +126,50 @@ def _run(args: argparse.Namespace) -> int:
         mouse_count = 0
         for batch in loader:
             observation = batch["observation"].to(device)
-            out = policy(observation)
-            loss = key_loss(out.keys_logits, batch["keys"].to(device))
-            loss = loss + button_loss(out.buttons_logits, batch["buttons"].to(device))
+            keys_t = batch["keys"].to(device)
+            buttons_t = batch["buttons"].to(device)
+            dx_t = batch["dx"].to(device)
+            dy_t = batch["dy"].to(device)
             mouse = batch["mouse_valid"].to(device) == 1
+            for name, tensor in (
+                ("observation", observation),
+                ("keys", keys_t),
+                ("buttons", buttons_t),
+                ("dx", dx_t),
+                ("dy", dy_t),
+            ):
+                if not torch.isfinite(tensor).all():
+                    raise ValueError(
+                        f"non-finite value in {name}: "
+                        f"nan={int(torch.isnan(tensor).sum())} inf={int(torch.isinf(tensor).sum())} "
+                        f"min={float(tensor.min())} max={float(tensor.max())}"
+                    )
+            out = policy(observation)
+            terms: dict[str, torch.Tensor] = {}
+            if keys_t.numel():
+                terms["keys"] = key_loss(out.keys_logits, keys_t)
+            if buttons_t.numel():
+                terms["buttons"] = button_loss(out.buttons_logits, buttons_t)
             if bool(mouse.any()):
-                dx = batch["dx"].to(device)[mouse]
-                dy = batch["dy"].to(device)[mouse]
-                loss = loss + mouse_loss(out.dx[mouse], dx)
-                loss = loss + mouse_loss(out.dy[mouse], dy)
+                dx = dx_t[mouse]
+                dy = dy_t[mouse]
+                terms["mouse"] = mouse_loss(out.dx[mouse], dx) + mouse_loss(out.dy[mouse], dy)
                 mouse_count += int(mouse.sum())
                 dx_abs += float(out.dx[mouse].abs().sum().detach())
                 dy_abs += float(out.dy[mouse].abs().sum().detach())
-            keys_bool = batch["keys"].to(device) == 1
+            for name, term in terms.items():
+                if not torch.isfinite(term):
+                    raise ValueError(
+                        f"loss term {name!r} is non-finite: "
+                        f"nan={bool(torch.isnan(term))} inf={bool(torch.isinf(term))} "
+                        f"sample dx range [{float(dx_t.min())}, {float(dx_t.max())}] "
+                        f"dy range [{float(dy_t.min())}, {float(dy_t.max())}]"
+                    )
+            loss = sum(terms.values())
+            keys_bool = keys_t == 1
             key_hits += int(((torch.sigmoid(out.keys_logits) >= 0.5) == keys_bool).sum().detach())
             key_total += keys_bool.numel()
-            buttons_bool = batch["buttons"].to(device) == 1
+            buttons_bool = buttons_t == 1
             button_hits += int(((torch.sigmoid(out.buttons_logits) >= 0.5) == buttons_bool).sum().detach())
             button_total += buttons_bool.numel()
             optimizer.zero_grad()

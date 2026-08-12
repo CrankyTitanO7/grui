@@ -23,12 +23,16 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 ml = ["torch>=2.0"]
+# Optional perception provider: NVIDIA LocateAnything (see perception/providers/).
+# The nvidia/LocateAnything-3B model itself is gated on Hugging Face (login
+# required) and needs a CUDA GPU; check its license before commercial use.
+locate = ["locate-anything>=0.1.0"]
 
 [project.scripts]
 grui = "app.main:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*", "ml*"]
+include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*", "ml*", "perception*"]
 
 [tool.setuptools.package-data]
 dataset = ["README.md"]

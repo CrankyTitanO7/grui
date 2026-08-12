@@ -17,6 +17,7 @@ import numpy as np
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -54,6 +55,15 @@ def _frame_to_pixmap(frame: np.ndarray, size: tuple[int, int]) -> QPixmap:
     )
 
 
+def _label_color(label: str) -> tuple[int, int, int]:
+    """Stable BGR color per prompt label, so detections stay identifiable."""
+    palette = [
+        (52, 152, 219), (231, 76, 60), (46, 204, 113), (241, 196, 15),
+        (155, 89, 182), (26, 188, 156), (230, 126, 34), (149, 165, 166),
+    ]
+    return palette[abs(hash(label)) % len(palette)]
+
+
 class PlayerWindow(QMainWindow):
     """Select a recording, play it with live key visualization, edit, save."""
 
@@ -72,6 +82,8 @@ class PlayerWindow(QMainWindow):
         self._at_end = False
         self._current_t = 0.0
         self._timeline_sel: tuple[float, float] | None = None
+        self._perception: dict[int, list] = {}  # frame_index -> [Detection]
+        self._perception_manifest = None
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -184,12 +196,25 @@ class PlayerWindow(QMainWindow):
         self._save_btn.clicked.connect(self._on_save)
         self._dataset_btn = QPushButton("Build Dataset…")
         self._dataset_btn.clicked.connect(self._on_build_dataset)
+        self._perception_btn = QPushButton("Perception…")
+        self._perception_btn.clicked.connect(self._on_perception)
         edit_row2.addWidget(self._undo_btn)
         edit_row2.addWidget(self._redo_btn)
         edit_row2.addWidget(self._reset_btn)
         edit_row2.addWidget(self._save_btn, 1)
         edit_row2.addWidget(self._dataset_btn)
+        edit_row2.addWidget(self._perception_btn)
         root.addLayout(edit_row2)
+
+        overlay_row = QHBoxLayout()
+        self._show_perception = QCheckBox("Show perception detections")
+        self._show_perception.setChecked(False)
+        self._show_perception.toggled.connect(self._on_perception_toggled)
+        self._perception_status = QLabel("")
+        self._perception_status.setStyleSheet("color: #888888;")
+        overlay_row.addWidget(self._show_perception)
+        overlay_row.addWidget(self._perception_status, 1)
+        root.addLayout(overlay_row)
 
         self.setCentralWidget(central)
         for button in central.findChildren(QPushButton):
@@ -202,7 +227,7 @@ class PlayerWindow(QMainWindow):
             self._select_all_btn, self._deselect_btn, self._trim_btn,
             self._cut_btn, self._copy_btn, self._paste_btn, self._delete_btn,
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
-            self._dataset_btn,
+            self._dataset_btn, self._perception_btn,
         ):
             widget.setEnabled(enabled)
 
@@ -286,6 +311,7 @@ class PlayerWindow(QMainWindow):
         self._timer.setInterval(int(1000 / max(1.0, reader.fps)))
         self._timer.start()
         self._set_enabled(True)
+        self._load_perception(recording)
         self.setWindowTitle(f"Recording Player — {recording.directory.name}")
         self._seek_to(0.0)
         self._status(f"Loaded {recording.directory.name}")
@@ -295,6 +321,53 @@ class PlayerWindow(QMainWindow):
             self._timer.stop()
             self._reader.stop()
             self._reader = None
+        self._perception = {}
+        self._perception_manifest = None
+        self._show_perception.setChecked(False)
+
+    # --------------------------------------------------------- perception
+
+    def _load_perception(self, recording: RecordingData) -> None:
+        """Load derived perception results, if any (optional, never required)."""
+        from perception.runner import CachedAnalysis
+
+        cached = CachedAnalysis(recording.directory / "perception")
+        if not cached.exists:
+            self._perception_status.setText("No perception results for this recording")
+            return
+        manifest = cached.read_manifest()
+        self._perception_manifest = manifest
+        by_frame: dict[int, list] = {}
+        for result in cached.read_results():
+            by_frame.setdefault(result.frame_index, []).extend(result.detections)
+        self._perception = by_frame
+        prompts = ", ".join(manifest.prompts) if manifest else ""
+        self._perception_status.setText(
+            f"Perception: {manifest.provider} ({prompts}) — {len(by_frame)} frames with detections"
+        )
+
+    def _on_perception_toggled(self, checked: bool) -> None:
+        if checked and not self._perception:
+            self._status("No perception detections loaded for this recording")
+
+    def _draw_perception_overlay(self, frame_index: int, frame: np.ndarray) -> np.ndarray:
+        """Draw detection boxes for the displayed frame (non-destructive)."""
+        detections = self._perception.get(frame_index)
+        if not detections or frame is None:
+            return frame
+        drawn = frame.copy()
+        for detection in detections:
+            box = detection.bbox
+            label = detection.label
+            color = _label_color(label)
+            pt1 = (int(round(box.x1)), int(round(box.y1)))
+            pt2 = (int(round(box.x2)), int(round(box.y2)))
+            cv2.rectangle(drawn, pt1, pt2, color, 2)
+            cv2.putText(
+                drawn, label, (pt1[0], max(0, pt1[1] - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+            )
+        return drawn
 
     # ------------------------------------------------------------ playback
 
@@ -313,6 +386,8 @@ class PlayerWindow(QMainWindow):
             return
         t = self._recording.frame_time(frame_index)
         self._current_t = t
+        if self._show_perception.isChecked():
+            frame = self._draw_perception_overlay(frame_index, frame)
         size = self._video_label.size()
         self._video_label.setPixmap(_frame_to_pixmap(frame, (size.width(), size.height())))
         self._update_state_views(t)
@@ -552,6 +627,19 @@ class PlayerWindow(QMainWindow):
         from app.ui.dataset_dialog import DatasetDialog
 
         DatasetDialog(self._recording, self).exec()
+
+    def _on_perception(self) -> None:
+        if self._recording is None:
+            return
+        from app.ui.perception_dialog import PerceptionDialog
+
+        dialog = PerceptionDialog(self._recording, self)
+        dialog.finished.connect(self._on_perception_done)
+        dialog.exec()
+
+    def _on_perception_done(self, _result: int) -> None:
+        if self._recording is not None:
+            self._load_perception(self._recording)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._teardown_reader()

@@ -16,11 +16,13 @@ logging.basicConfig(
 
 
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] in ("dataset", "train", "agent"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("dataset", "train", "agent", "perception"):
         if sys.argv[1] == "dataset":
             from dataset.cli import run as cli
         elif sys.argv[1] == "train":
             from ml.train import main as cli
+        elif sys.argv[1] == "perception":
+            from perception.cli import run as cli
         else:
             from ml.inject import run_agent as cli
 

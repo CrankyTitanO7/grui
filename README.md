@@ -82,6 +82,50 @@ grui agent --checkpoint ckpt.pt --dataset ./dataset --inject        # presses ke
 The policy is a CNN + GRU: observation window -> held keys, held mouse
 buttons, and pointer velocity. See `ml/README.md` for details.
 
+## Optional Perception
+
+GRUI can optionally analyze **existing recordings** with a visual-perception
+provider: natural-language prompts are grounded in recorded frames (e.g.
+"boss", "projectile", "player") and the resulting boxes are stored as a
+*derived artifact* next to the raw demonstration.
+
+* LocateAnything is one optional provider behind a generic
+  `PerceptionProvider` interface — other models can be added without
+  touching the recorder, player or dataset builder.
+* Perception is never required: a normal GRUI installation records, plays,
+  edits, builds datasets and trains behavior-cloning policies with zero
+  perception code loaded. Models are only loaded when you explicitly run an
+  analysis.
+* Results are written to `<recording>/perception/` (`manifest.json` +
+  `results.jsonl`) using the exact frame timestamps from `frames.jsonl`.
+  The raw recording, `events.jsonl` and the video are never modified.
+* Everything runs locally — no data is uploaded, no telemetry.
+
+Install the optional LocateAnything dependency stack:
+
+```bash
+pip install -e ".[locate]"
+```
+
+Analyze a recording (sampling ~2 frames per second):
+
+```bash
+grui perception analyze <recording> --provider locate_anything \
+    --prompt "boss" --prompt "projectile" --fps 2
+
+grui perception providers        # list providers and availability
+```
+
+**Licensing & hardware**: `nvidia/LocateAnything-3B` is a gated Hugging Face
+model (~6 GB, `huggingface-cli login`) needing a CUDA GPU with several GB of
+VRAM. GRUI never bundles or silently downloads model weights; check the
+model's license before commercial use.
+
+The built-in player has an optional overlay: **Perception…** runs an
+analysis, and **Show perception detections** draws the boxes on the video.
+Perception is an extension — GRUI's core remains general-purpose human
+demonstration recording and imitation-learning dataset generation.
+
 ## Player & editor
 
 Click **Open Player** in the main window to browse saved recordings:
@@ -185,6 +229,13 @@ dropped deliberately — the video stays at constant frame rate and
 Dataset builders align events to video through this file, never through
 wall-clock guesses.
 
+### Derived artifacts
+
+Perception analysis (see [Optional Perception](#optional-perception)) writes
+an extra `perception/` directory (`manifest.json` + `results.jsonl`) next to
+the raw files. It is optional, derived and never required to read or edit a
+recording.
+
 ## Architecture
 
 ```text
@@ -246,3 +297,4 @@ excluded from tests.
 - [ ] Excluded-application list (privacy)
 - [x] Dataset builder: `grui dataset build <recording>` (observation->action samples, CLI)
 - [x] PyTorch dataset/agent: `grui train` (CNN+GRU behavior cloning) and `grui agent` (dry run or pynput injection)
+- [x] Optional perception: `grui perception analyze <recording>` (generic provider interface + LocateAnything, derived results, player overlay)

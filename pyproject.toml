@@ -26,7 +26,12 @@ ml = ["torch>=2.0"]
 # Optional perception provider: NVIDIA LocateAnything (see perception/providers/).
 # The nvidia/LocateAnything-3B model itself is gated on Hugging Face (login
 # required) and needs a CUDA GPU; check its license before commercial use.
-locate = ["locate-anything>=0.1.0"]
+locate = [
+    "locate-anything>=0.1.0",
+    # official HF download accelerator for repos stored on Xet storage
+    # (LocateAnything-3B is one): `huggingface_hub[hf_xet]`
+    "hf-xet>=1.1",
+]
 
 # locate-anything 0.1.0 pins numpy==2.0.2 and Pillow==11.1.0, which have no
 # Python 3.14 Windows wheels (and no compiler on most Windows setups), so the

@@ -125,6 +125,12 @@ grui perception analyze <recording> --provider locate_anything \
 
 grui perception providers        # list providers and availability
 ```
+### a note on locateanything
+locate anything is not perfect. Try the free sample at [https://huggingface.co/spaces/nvidia/LocateAnything](https://huggingface.co/spaces/nvidia/LocateAnything), with a couple of prompts to try and get it to recognize some objects before running on your data:
+
+<img width="1205" height="644" alt="attempt 1" src="https://github.com/user-attachments/assets/870579e1-55bb-4e9b-8833-474478fde69b" />
+<img width="1205" height="644" alt="attempt 2" src="https://github.com/user-attachments/assets/cb9847b1-82be-4290-8d11-95e112599ba4" />
+<img width="1205" height="644" alt="attempt 3" src="https://github.com/user-attachments/assets/8be4f93f-53fa-402a-ab89-167c2c9636d8" />
 
 **Licensing & hardware**: `nvidia/LocateAnything-3B` is a gated Hugging Face
 model (~6 GB, `huggingface-cli login`) needing a CUDA GPU with several GB of

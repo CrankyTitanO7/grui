@@ -69,9 +69,15 @@ class LocateAnythingProvider:
         "Check the nvidia/LocateAnything-3B license before commercial use.",
     ]
 
-    def __init__(self, device: str = "cuda", locator: Any | None = None) -> None:
+    def __init__(
+        self,
+        device: str = "cuda",
+        locator: Any | None = None,
+        quantize: str = "none",
+    ) -> None:
         self._device = device
         self._locator = locator
+        self._quantize = quantize
 
     @property
     def version(self) -> str:
@@ -82,6 +88,10 @@ class LocateAnythingProvider:
 
     def is_available(self) -> bool:
         """Import-level availability check; never instantiates the model."""
+        if self._quantize != "none":
+            # The quantized path loads the model in-repo with Transformers, so
+            # it does not depend on the external backends being importable.
+            return True
         return _backend_importable()
 
     def prepare(self) -> None:
@@ -89,11 +99,18 @@ class LocateAnythingProvider:
         self._load()
 
     def with_options(self, **options: Any) -> "LocateAnythingProvider":
-        """Reconfigure (e.g. ``device="cuda:1"``); returns a new instance."""
+        """Reconfigure (e.g. ``device="cuda:1"``, ``quantize="4bit"``)."""
         device = options.get("device")
-        if device in (None, self._device):
+        quantize = options.get("quantize")
+        if (
+            device in (None, self._device)
+            and quantize in (None, self._quantize)
+        ):
             return self
-        return LocateAnythingProvider(device=device)
+        return LocateAnythingProvider(
+            device=self._device if device is None else device,
+            quantize=self._quantize if quantize is None else quantize,
+        )
 
     def _load(self) -> Any:
         """Lazily load the backend locator (imports/instantiates the model)."""
@@ -101,7 +118,7 @@ class LocateAnythingProvider:
             from ml.locate import load_locator
 
             try:
-                self._locator = load_locator(self._device)
+                self._locator = load_locator(self._device, quantize=self._quantize)
             except Exception as exc:  # noqa: BLE001 - surface any model-load failure clearly
                 raise RuntimeError(
                     "LocateAnything could not be loaded:\n"

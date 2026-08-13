@@ -14,19 +14,25 @@ unless ``--iknow`` is passed. Two backends are supported:
   — object detection with categories only;
 * the Eagle repo's ``LocateAnythingWorker`` (``locateanything_worker.py``
   on ``PYTHONPATH``) — full task support including GUI grounding.
+
+VRAM can be cut via ``--quantize 8bit|4bit`` (bitsandbytes; ~4 GB / ~2 GB
+instead of ~8 GB at bf16, loaded in-repo with Transformers so either backend
+works) and ``--max-pixels N`` (downscales frames before inference to shrink
+the vision encoder; boxes are rescaled to the original frame size on output).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
 
 WARNINGS = [
     "LocateAnything-3B is a ~6 GB model, gated on Hugging Face (`huggingface-cli login`).",
-    "It needs a CUDA GPU with ~6-8 GB VRAM; CPU inference is not practical.",
+    "It needs a CUDA GPU; ~6-8 GB VRAM at bf16, ~2-4 GB with --quantize 4bit/8bit.",
     "Inference is slow (a 3B VLM): frames are sampled every --every N, not all.",
     "This uses research/community code; localization quality varies by prompt.",
 ]
@@ -95,8 +101,157 @@ class WorkerLocator(Locator):
         return {"boxes": boxes, "points": points}
 
 
-def load_locator(device: str = "cuda") -> Locator:
-    """Load a LocateAnything backend. Raises ``RuntimeError`` with setup hints."""
+class HfLocateAnythingWorker:
+    """In-repo LocateAnything worker with bitsandbytes quantization.
+
+    Mirrors the Eagle repo's ``LocateAnythingWorker`` surface (the methods
+    :class:`WorkerLocator` calls) but loads ``nvidia/LocateAnything-3B``
+    directly with Transformers so ``load_in_4bit``/``load_in_8bit`` can be
+    applied, cutting inference VRAM from ~8 GB (bf16) to ~2-4 GB. Used by
+    :func:`load_locator` whenever quantization is requested, regardless of
+    which external backend is installed.
+
+    Requires ``transformers`` (and ``bitsandbytes`` for the quantized load),
+    which the model needs anyway. Constructing it is the expensive part —
+    pass the instance around, don't rebuild it per frame.
+    """
+
+    def __init__(
+        self,
+        model_path: str = "nvidia/LocateAnything-3B",
+        device: str = "cuda",
+        quantize: str = "4bit",
+        max_tokens: int = 1024,
+    ) -> None:
+        import torch
+        from transformers import AutoModel, AutoProcessor, AutoTokenizer
+
+        self.device = device
+        self.quantize = quantize
+        self.max_tokens = max_tokens
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
+        kwargs: dict = {"trust_remote_code": True}
+        if quantize == "4bit":
+            kwargs.update(load_in_4bit=True, device_map="auto")
+        elif quantize == "8bit":
+            kwargs.update(load_in_8bit=True, device_map="auto")
+        else:  # "none"
+            kwargs["torch_dtype"] = torch.bfloat16
+        self.model = AutoModel.from_pretrained(model_path, **kwargs)
+        if quantize == "none":
+            self.model.to(device)
+        self.model.eval()
+
+    def predict(self, image, question: str, **kwargs) -> dict:
+        """Run one perception query; returns ``{"answer": ...}``."""
+        import torch
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        apply_template = getattr(
+            self.processor, "py_apply_chat_template", None
+        ) or self.processor.apply_chat_template
+        text = apply_template(messages, tokenize=False, add_generation_prompt=True)
+        images, videos = self.processor.process_vision_info(messages)
+        inputs = self.processor(
+            text=[text], images=images, videos=videos, return_tensors="pt"
+        ).to(self.device)
+
+        pixel_values = inputs["pixel_values"].to(self.model.dtype)
+        with torch.no_grad():
+            response = self.model.generate(
+                pixel_values=pixel_values,
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                image_grid_hws=inputs.get("image_grid_hws"),
+                tokenizer=self.tokenizer,
+                max_new_tokens=self.max_tokens,
+                use_cache=True,
+                generation_mode="hybrid",
+                do_sample=False,
+                verbose=False,
+            )
+        return {"answer": response[0] if isinstance(response, tuple) else response}
+
+    # ---- Task conveniences (same prompts as the Eagle worker) ----
+
+    def detect(self, image, categories: list[str], **kwargs) -> dict:
+        cats = "</c>".join(categories)
+        prompt = f"Locate all the instances that matches the following description: {cats}."
+        return self.predict(image, prompt, **kwargs)
+
+    def ground_gui(self, image, phrase: str, output_type: str = "box", **kwargs) -> dict:
+        if output_type == "point":
+            prompt = f"Point to: {phrase}."
+        else:
+            prompt = f"Locate the region that matches the following description: {phrase}."
+        return self.predict(image, prompt, **kwargs)
+
+    def point(self, image, phrase: str, **kwargs) -> dict:
+        return self.predict(image, f"Point to: {phrase}.", **kwargs)
+
+    def detect_text(self, image, **kwargs) -> dict:
+        return self.predict(image, "Detect all the text in box format.", **kwargs)
+
+    @staticmethod
+    def parse_boxes(answer: str, image_width: int, image_height: int) -> list[dict]:
+        boxes = []
+        for m in re.finditer(r"<box><(\d+)><(\d+)><(\d+)><(\d+)></box>", answer):
+            x1, y1, x2, y2 = [int(g) for g in m.groups()]
+            boxes.append({
+                "x1": x1 / 1000 * image_width,
+                "y1": y1 / 1000 * image_height,
+                "x2": x2 / 1000 * image_width,
+                "y2": y2 / 1000 * image_height,
+            })
+        return boxes
+
+    @staticmethod
+    def parse_points(answer: str, image_width: int, image_height: int) -> list[dict]:
+        points = []
+        for m in re.finditer(r"<box><(\d+)><(\d+)></box>", answer):
+            x, y = int(m.group(1)), int(m.group(2))
+            points.append({
+                "x": x / 1000 * image_width,
+                "y": y / 1000 * image_height,
+            })
+        return points
+
+
+def load_locator(
+    device: str = "cuda",
+    quantize: str = "none",
+    max_tokens: int = 1024,
+) -> Locator:
+    """Load a LocateAnything backend.
+
+    ``quantize`` is ``"none"`` (bf16, ~8 GB VRAM), ``"8bit"`` (~4 GB) or
+    ``"4bit"`` (~2 GB). The quantized path uses :class:`HfLocateAnythingWorker`
+    so it works whether the PyPI wrapper or the Eagle worker is installed;
+    unquantized runs keep the existing backend negotiation.
+    """
+    if quantize != "none":
+        try:
+            worker = HfLocateAnythingWorker(
+                device=device, quantize=quantize, max_tokens=max_tokens
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "Quantized LocateAnything needs the Transformers/bitsandbytes stack:\n"
+                "  pip install transformers bitsandbytes accelerate\n"
+                f"    ({exc})"
+            ) from exc
+        return WorkerLocator(worker)
     try:
         from locate_anything import LocateAnything
     except ImportError:  # backend not installed; try the next one
@@ -120,13 +275,49 @@ def load_locator(device: str = "cuda") -> Locator:
     )
 
 
-def _load_image(path: Path):
+def _load_image(path: Path, max_pixels: int | None = None):
+    """Load a frame as RGB PIL, optionally downscaled.
+
+    Returns ``(image, orig_size)`` where ``orig_size`` is the on-disk
+    ``(width, height)``. When ``max_pixels`` is set, larger frames are
+    resized (aspect-ratio preserved) to fit within that many pixels so the
+    vision encoder uses less VRAM; callers scale results back with
+    :func:`_scale_result`.
+    """
     import cv2
     from PIL import Image
 
     frame = cv2.imread(str(path))
+    if frame is None:
+        raise ValueError(f"could not read frame image: {path}")
+    orig_size = (frame.shape[1], frame.shape[0])  # (width, height)
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(frame)
+    if max_pixels and frame.shape[1] * frame.shape[0] > max_pixels:
+        h, w = frame.shape[:2]
+        scale = (max_pixels / (w * h)) ** 0.5
+        frame = cv2.resize(
+            frame,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    return Image.fromarray(frame), orig_size
+
+
+def _scale_result(result: dict, from_size, to_size) -> dict:
+    """Rescale boxes/points from ``from_size`` into ``to_size`` (w, h) space."""
+    from_w, from_h = from_size
+    to_w, to_h = to_size
+    if (from_w, from_h) == (to_w, to_h):
+        return result
+    sx, sy = to_w / from_w, to_h / from_h
+    return {
+        "boxes": [
+            {"x1": b["x1"] * sx, "y1": b["y1"] * sy,
+             "x2": b["x2"] * sx, "y2": b["y2"] * sy}
+            for b in result["boxes"]
+        ],
+        "points": [{"x": p["x"] * sx, "y": p["y"] * sy} for p in result["points"]],
+    }
 
 
 def enrich_dataset(
@@ -137,6 +328,7 @@ def enrich_dataset(
     every: int = 10,
     out: Path | str | None = None,
     locator: Locator | None = None,
+    max_pixels: int | None = None,
     log=print,
 ) -> Path:
     """Locate each prompt on every Nth frame; returns the output path."""
@@ -162,9 +354,11 @@ def enrich_dataset(
     records = 0
     with out_path.open("w", encoding="utf-8") as fh:
         for entry in sampled:
-            image = _load_image(root / entry["path"])
+            image, orig_size = _load_image(root / entry["path"], max_pixels=max_pixels)
             for prompt in prompts:
                 result = locator.locate(image, prompt, task)
+                if max_pixels:
+                    result = _scale_result(result, image.size, orig_size)
                 fh.write(
                     json.dumps(
                         {
@@ -216,6 +410,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", metavar="PATH", default=None,
                         help="output path (default: <dataset>/locations.jsonl)")
     parser.add_argument("--device", default="cuda", help="cuda or cpu (cpu is not practical)")
+    parser.add_argument(
+        "--quantize", default="none", choices=("none", "8bit", "4bit"),
+        help="bitsandbytes weight quantization to cut VRAM: 8bit ~4 GB, "
+             "4bit ~2 GB (default: none / bf16 ~8 GB; needs transformers+bitsandbytes)",
+    )
+    parser.add_argument(
+        "--max-pixels", type=int, default=None, metavar="N",
+        help="downscale frames to at most N pixels before inference to shrink the "
+             "vision encoder's VRAM; boxes/points are rescaled to the original "
+             "frame size in the output",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=1024,
+        help="max new tokens per inference (default: 1024)",
+    )
     parser.add_argument("--iknow", action="store_true",
                         help="skip the model-cost warnings")
     return parser
@@ -242,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             if answer != "y":
                 print("aborted.", file=sys.stderr)
                 return 1
-        locator = load_locator(args.device)
+        locator = load_locator(args.device, args.quantize, args.max_tokens)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -250,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
         out = enrich_dataset(
             args.dataset, prompts, args.task,
             every=args.every, out=args.out, locator=locator,
+            max_pixels=args.max_pixels,
         )
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

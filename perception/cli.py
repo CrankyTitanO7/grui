@@ -48,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="process every Nth frame (alternative to --fps)")
     analyze.add_argument("--device", default=None,
                          help="override the provider's default device, e.g. cuda:1 or cpu")
+    analyze.add_argument("--quantize", default=None, choices=("none", "8bit", "4bit"),
+                         help="bitsandbytes weight quantization to cut VRAM: "
+                              "8bit ~4 GB, 4bit ~2 GB (needs transformers+bitsandbytes)")
     analyze.add_argument("--force", action="store_true",
                          help="re-run even if matching cached results exist")
     return parser
@@ -82,7 +85,9 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
-        provider = with_options(get(args.provider), device=args.device)
+        provider = with_options(
+            get(args.provider), device=args.device, quantize=args.quantize
+        )
     except KeyError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -31,6 +31,11 @@ locate = [
     # official HF download accelerator for repos stored on Xet storage
     # (LocateAnything-3B is one): `huggingface_hub[hf_xet]`
     "hf-xet>=1.1",
+    # needed for `--quantize 4bit|8bit` (ml.locate.HfLocateAnythingWorker
+    # loads the model in-repo via Transformers + bitsandbytes)
+    "transformers>=4.57",
+    "accelerate",
+    "bitsandbytes",
 ]
 
 # locate-anything 0.1.0 pins numpy==2.0.2 and Pillow==11.1.0, which have no

@@ -75,6 +75,82 @@ def test_reader_does_not_flood_queue(tmp_path):
     assert all(frame is not None for _, frame in all_frames)
 
 
+def _write_perception(recording, by_frame):
+    """Write fake cached perception results: frame_index -> [labels]."""
+    import json
+
+    out = recording.directory / "perception"
+    out.mkdir(exist_ok=True)
+    (out / "manifest.json").write_text(
+        json.dumps(
+            {"provider": "test", "provider_version": "0", "prompts": ["test"], "count": len(by_frame)}
+        ),
+        encoding="utf-8",
+    )
+    with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
+        for frame_index, labels in by_frame.items():
+            row = {
+                "frame_index": frame_index,
+                "t": float(recording.frame_time(frame_index)),
+                "prompt": "test",
+                "detections": [
+                    {"label": label, "bbox": {"x1": 1.0, "y1": 1.0, "x2": 5.0, "y2": 5.0}}
+                    for label in labels
+                ],
+            }
+            fh.write(json.dumps(row) + "\n")
+
+
+def test_next_perception_disabled_without_results(window):
+    assert not window._next_perception_btn.isEnabled()
+
+
+def test_next_perception_skips_to_detections(window):
+    _write_perception(window._recording, {5: ["one"], 15: ["two"]})
+    window._load_perception(window._recording)
+    assert window._next_perception_btn.isEnabled()
+
+    window._on_next_perception()
+    assert window._current_t == pytest.approx(window._recording.frame_time(5))
+    assert window._timeline._playhead == pytest.approx(window._recording.frame_time(5))
+    assert not window._playing
+
+    window._on_next_perception()
+    assert window._current_t == pytest.approx(window._recording.frame_time(15))
+
+    window._on_next_perception()  # past the last detection -> wraps to the first
+    assert window._current_t == pytest.approx(window._recording.frame_time(5))
+
+
+def test_zoom_scales_display(window):
+    base = window._video_label.pixmap().size()
+    assert window._zoom_slider.value() == 100
+    assert window._zoom_pct_label.text() == "100%"
+
+    window._zoom_slider.setValue(200)
+    scaled = window._video_label.pixmap().size()
+    assert scaled.width() > base.width()
+    assert scaled.height() > base.height()
+    assert window._zoom_pct_label.text() == "200%"
+    assert window._video_label.minimumSize() == scaled
+
+    window._on_zoom_fit()
+    assert window._zoom_slider.value() == 100
+    assert window._zoom_pct_label.text() == "100%"
+    fitted = window._video_label.pixmap().size()
+    assert fitted.width() < scaled.width()
+
+
+def test_zoom_controls_safe_without_recording(tmp_path):
+    win = PlayerWindow(recordings_root=str(tmp_path / "root"))
+    win._zoom_slider.setValue(300)  # no frame loaded — must not crash
+    win._zoom_out_btn.click()
+    win._zoom_in_btn.click()
+    win._zoom_fit_btn.click()
+    assert win._video_label.pixmap() is None or win._video_label.pixmap().isNull()
+    win.close()
+
+
 def test_edit_cut_undo_redo(window):
     original = window._session.timeline.duration
     events_before = len(window._timeline._events)

@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -84,6 +86,8 @@ class PlayerWindow(QMainWindow):
         self._timeline_sel: tuple[float, float] | None = None
         self._perception: dict[int, list] = {}  # frame_index -> [Detection]
         self._perception_manifest = None
+        self._zoom = 1.0  # relative to fit-to-window size
+        self._current_frame: np.ndarray | None = None
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -133,7 +137,12 @@ class PlayerWindow(QMainWindow):
         self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._video_label.setMinimumHeight(240)
         self._video_label.setStyleSheet("background: #101010; color: #666; border-radius: 6px;")
-        root.addWidget(self._video_label, 1)
+        self._video_scroll = QScrollArea()
+        self._video_scroll.setWidgetResizable(False)
+        self._video_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._video_scroll.viewport().setStyleSheet("background: #101010;")
+        self._video_scroll.setWidget(self._video_label)
+        root.addWidget(self._video_scroll, 1)
 
         self._keyboard_view = KeyboardView()
         root.addWidget(self._keyboard_view)
@@ -156,6 +165,31 @@ class PlayerWindow(QMainWindow):
         transport.addWidget(self._step_btn)
         transport.addWidget(self._time_label, 1)
         root.addLayout(transport)
+
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(QLabel("Zoom:"))
+        self._zoom_out_btn = QPushButton("-")
+        self._zoom_out_btn.setToolTip("Zoom out")
+        self._zoom_out_btn.clicked.connect(self._on_zoom_out)
+        self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._zoom_slider.setRange(25, 400)
+        self._zoom_slider.setValue(100)
+        self._zoom_slider.setToolTip("Zoom relative to window fit (100% = fit)")
+        self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        self._zoom_in_btn = QPushButton("+")
+        self._zoom_in_btn.setToolTip("Zoom in")
+        self._zoom_in_btn.clicked.connect(self._on_zoom_in)
+        self._zoom_fit_btn = QPushButton("Fit")
+        self._zoom_fit_btn.setToolTip("Fit frame to window (100%)")
+        self._zoom_fit_btn.clicked.connect(self._on_zoom_fit)
+        self._zoom_pct_label = QLabel("100%")
+        self._zoom_pct_label.setMinimumWidth(44)
+        zoom_row.addWidget(self._zoom_out_btn)
+        zoom_row.addWidget(self._zoom_slider, 1)
+        zoom_row.addWidget(self._zoom_in_btn)
+        zoom_row.addWidget(self._zoom_fit_btn)
+        zoom_row.addWidget(self._zoom_pct_label)
+        root.addLayout(zoom_row)
 
         edit_row = QHBoxLayout()
         edit_row.addWidget(QLabel("Selection:"))
@@ -212,7 +246,13 @@ class PlayerWindow(QMainWindow):
         self._show_perception.toggled.connect(self._on_perception_toggled)
         self._perception_status = QLabel("")
         self._perception_status.setStyleSheet("color: #888888;")
+        self._next_perception_btn = QPushButton("⏭ Next Detection")
+        self._next_perception_btn.setToolTip(
+            "Skip to the next frame with perception detections (wraps to the first)"
+        )
+        self._next_perception_btn.clicked.connect(self._on_next_perception)
         overlay_row.addWidget(self._show_perception)
+        overlay_row.addWidget(self._next_perception_btn)
         overlay_row.addWidget(self._perception_status, 1)
         root.addLayout(overlay_row)
 
@@ -224,6 +264,8 @@ class PlayerWindow(QMainWindow):
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (
             self._play_btn, self._stop_btn, self._step_btn,
+            self._zoom_out_btn, self._zoom_slider, self._zoom_in_btn,
+            self._zoom_fit_btn, self._next_perception_btn,
             self._select_all_btn, self._deselect_btn, self._trim_btn,
             self._cut_btn, self._copy_btn, self._paste_btn, self._delete_btn,
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
@@ -323,7 +365,9 @@ class PlayerWindow(QMainWindow):
             self._reader = None
         self._perception = {}
         self._perception_manifest = None
+        self._current_frame = None
         self._show_perception.setChecked(False)
+        self._next_perception_btn.setEnabled(False)
 
     # --------------------------------------------------------- perception
 
@@ -334,6 +378,7 @@ class PlayerWindow(QMainWindow):
         cached = CachedAnalysis(recording.directory / "perception")
         if not cached.exists:
             self._perception_status.setText("No perception results for this recording")
+            self._next_perception_btn.setEnabled(False)
             return
         manifest = cached.read_manifest()
         self._perception_manifest = manifest
@@ -345,6 +390,7 @@ class PlayerWindow(QMainWindow):
         self._perception_status.setText(
             f"Perception: {manifest.provider} ({prompts}) — {len(by_frame)} frames with detections"
         )
+        self._next_perception_btn.setEnabled(bool(by_frame))
 
     def _on_perception_toggled(self, checked: bool) -> None:
         if checked and not self._perception:
@@ -388,11 +434,27 @@ class PlayerWindow(QMainWindow):
         self._current_t = t
         if self._show_perception.isChecked():
             frame = self._draw_perception_overlay(frame_index, frame)
-        size = self._video_label.size()
-        self._video_label.setPixmap(_frame_to_pixmap(frame, (size.width(), size.height())))
+        self._current_frame = frame
+        self._render_frame()
         self._update_state_views(t)
         self._timeline.set_playhead(t)
         self._update_time_label()
+
+    def _render_size(self) -> tuple[int, int]:
+        """Display size for the current frame: fit-to-viewport scaled by zoom."""
+        viewport = self._video_scroll.viewport().size()
+        return (
+            max(1, int(viewport.width() * self._zoom)),
+            max(1, int(viewport.height() * self._zoom)),
+        )
+
+    def _render_frame(self) -> None:
+        """Redraw the current frame at the current zoom (no-op until one is loaded)."""
+        if self._current_frame is None:
+            return
+        pixmap = _frame_to_pixmap(self._current_frame, self._render_size())
+        self._video_label.setPixmap(pixmap)
+        self._video_label.setMinimumSize(pixmap.size())
 
     def _update_state_views(self, t: float) -> None:
         if self._keys is not None:
@@ -467,6 +529,47 @@ class PlayerWindow(QMainWindow):
             self._update_state_views(t)
             self._timeline.set_playhead(t)
             self._update_time_label()
+
+    # ---------------------------------------------------------------- zoom
+
+    def _on_zoom_changed(self, value: int) -> None:
+        self._zoom = value / 100.0
+        self._zoom_pct_label.setText(f"{value}%")
+        self._render_frame()
+
+    def _on_zoom_in(self) -> None:
+        self._zoom_slider.setValue(min(self._zoom_slider.maximum(), self._zoom_slider.value() + 25))
+
+    def _on_zoom_out(self) -> None:
+        self._zoom_slider.setValue(max(self._zoom_slider.minimum(), self._zoom_slider.value() - 25))
+
+    def _on_zoom_fit(self) -> None:
+        self._zoom_slider.setValue(100)
+
+    # ------------------------------------------------- next detection skip
+
+    def _on_next_perception(self) -> None:
+        """Skip to the next frame with perception detections (wraps to the first)."""
+        if self._recording is None or not self._perception:
+            return
+        current = self._recording.nearest_frame_index(self._current_t)
+        upcoming = sorted(fi for fi in self._perception if fi > current)
+        target = upcoming[0] if upcoming else min(self._perception)
+        self._playing = False
+        self._at_end = False
+        if self._reader is not None:
+            self._reader.set_playing(False)
+        self._play_btn.setText("▶ Play")
+        self._seek_to_index(target)
+        t = self._recording.frame_time(target)
+        self._current_t = t
+        self._update_state_views(t)
+        self._timeline.set_playhead(t)
+        self._update_time_label()
+        if upcoming:
+            self._status(f"Next detection at {_format_time(t)}")
+        else:
+            self._status(f"No more detections — wrapped to {_format_time(t)}")
 
     # ------------------------------------------------------------ editing
 
@@ -644,3 +747,8 @@ class PlayerWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._teardown_reader()
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if getattr(self, "_video_scroll", None) is not None:
+            self._render_frame()

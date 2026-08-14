@@ -51,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--quantize", default=None, choices=("none", "8bit", "4bit"),
                          help="bitsandbytes weight quantization to cut VRAM: "
                               "8bit ~4 GB, 4bit ~2 GB (needs transformers+bitsandbytes)")
+    analyze.add_argument("--max-pixels", type=int, default=None, metavar="N",
+                         help="downscale frames to at most N pixels before inference "
+                              "to shrink the vision encoder's VRAM (e.g. 786432 ≈ "
+                              "1024x768); boxes are rescaled to the original frame "
+                              "size in the results")
     analyze.add_argument("--force", action="store_true",
                          help="re-run even if matching cached results exist")
     return parser
@@ -115,6 +120,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             prompts,
             every=args.every,
             fps=args.fps,
+            max_pixels=args.max_pixels,
             force=args.force,
         )
     except (ValueError, RuntimeError) as exc:

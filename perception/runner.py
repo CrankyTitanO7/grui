@@ -29,6 +29,7 @@ returned without recomputation.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ from typing import Any, Callable
 import numpy as np
 
 from perception.base import PerceptionProvider
-from perception.types import PerceptionManifest, PerceptionResult
+from perception.types import BoundingBox, PerceptionManifest, PerceptionResult
 from storage.recording import RecordingData, load_recording
 
 _FORMAT_VERSION = 1
@@ -83,12 +84,22 @@ def select_frame_indices(
     return list(range(0, frame_count, every))
 
 
-def _decode_frames(video_path: Path, wanted: list[int]) -> dict[int, np.ndarray]:
-    """Decode the listed frame indices in one sequential pass (BGR)."""
+def _decode_frames(
+    video_path: Path, wanted: list[int], max_pixels: int | None = None
+) -> tuple[dict[int, np.ndarray], dict[int, tuple[int, int]]]:
+    """Decode the listed frame indices in one sequential pass (BGR).
+
+    With ``max_pixels`` set, frames larger than that many pixels are
+    downscaled (aspect-ratio preserved) so the vision encoder uses less
+    VRAM; the original ``(width, height)`` of every decoded frame is
+    returned too, so :func:`_rescale` can map detections back to
+    original-frame coordinates before the results are written.
+    """
     import cv2
 
     wanted_set = set(wanted)
     frames: dict[int, np.ndarray] = {}
+    orig_sizes: dict[int, tuple[int, int]] = {}
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"could not open video: {video_path}")
@@ -99,7 +110,8 @@ def _decode_frames(video_path: Path, wanted: list[int]) -> dict[int, np.ndarray]
             if not ok:
                 break
             if index in wanted_set:
-                frames[index] = frame
+                orig_sizes[index] = (frame.shape[1], frame.shape[0])
+                frames[index] = _downscale(frame, max_pixels)
                 wanted_set.discard(index)
             index += 1
     finally:
@@ -110,7 +122,53 @@ def _decode_frames(video_path: Path, wanted: list[int]) -> dict[int, np.ndarray]
             f"{sorted(wanted_set)[:5]}{'...' if len(wanted_set) > 5 else ''} "
             f"({len(frames)}/{len(wanted)} decoded)"
         )
-    return frames
+    return frames, orig_sizes
+
+
+def _downscale(frame: np.ndarray, max_pixels: int | None) -> np.ndarray:
+    """Aspect-preserving resize of ``frame`` to at most ``max_pixels``."""
+    if not max_pixels or max_pixels < 1:
+        return frame
+    import cv2
+
+    h, w = frame.shape[:2]
+    if w * h <= max_pixels:
+        return frame
+    scale = (max_pixels / (w * h)) ** 0.5
+    return cv2.resize(
+        frame,
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
+def _rescale(
+    detections: list[Any], from_size: tuple[int, int], to_size: tuple[int, int]
+) -> list[Any]:
+    """Scale Detection bboxes from ``from_size`` into ``to_size`` (w, h)."""
+    from_w, from_h = from_size
+    to_w, to_h = to_size
+    if (from_w, from_h) == (to_w, to_h):
+        return detections
+    sx, sy = to_w / from_w, to_h / from_h
+    scaled = []
+    for detection in detections:
+        if detection.bbox is None:
+            scaled.append(detection)
+            continue
+        bbox = detection.bbox
+        scaled.append(
+            dataclasses.replace(
+                detection,
+                bbox=BoundingBox(
+                    x1=bbox.x1 * sx,
+                    y1=bbox.y1 * sy,
+                    x2=bbox.x2 * sx,
+                    y2=bbox.y2 * sy,
+                ),
+            )
+        )
+    return scaled
 
 
 def _manifest(
@@ -164,6 +222,7 @@ def analyze_recording(
     *,
     every: int | None = None,
     fps: float | None = None,
+    max_pixels: int | None = None,
     out_dir: Path | str | None = None,
     force: bool = False,
     log: Callable[[str], None] = print,
@@ -178,6 +237,8 @@ def analyze_recording(
     """
     if isinstance(recording, (str, Path)):
         recording = load_recording(recording)
+    if max_pixels is not None and max_pixels < 1:
+        raise ValueError(f"max_pixels must be >= 1 (got {max_pixels})")
     prompts = [str(p).strip() for p in prompts]
     if not prompts or any(not p for p in prompts):
         raise ValueError("give at least one non-empty prompt")
@@ -200,6 +261,7 @@ def analyze_recording(
         "fps": float(fps) if fps is not None else float(recording.fps / max(1, stride)),
         "every": stride,
         "frames": len(indices),
+        "max_pixels": max_pixels,
     }
 
     out = CachedAnalysis(Path(out_dir) if out_dir else recording.directory / "perception")
@@ -235,12 +297,19 @@ def analyze_recording(
     started = time.monotonic()
     records = 0
     try:
-        frames = _decode_frames(recording.video_path, indices)
+        frames, orig_sizes = _decode_frames(
+            recording.video_path, indices, max_pixels=max_pixels
+        )
         with tmp_results.open("w", encoding="utf-8") as fh:
             for index in sorted(frames):
                 frame = frames[index]
+                height, width = frame.shape[:2]
+                orig_width, orig_height = orig_sizes[index]
                 for prompt in prompts:
                     detections = provider.analyze(frame, [prompt])
+                    detections = _rescale(
+                        detections, (width, height), (orig_width, orig_height)
+                    )
                     result = PerceptionResult(
                         frame_index=index,
                         t=float(recording.frame_time(index)),

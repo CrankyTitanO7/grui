@@ -123,8 +123,16 @@ Analyze a recording (sampling ~2 frames per second):
 grui perception analyze <recording> --provider locate_anything \
     --prompt "boss" --prompt "projectile" --fps 2
 
+grui perception analyze <recording> --prompt "enemy" --quantize 4bit \
+    --max-pixels 786432        # cut VRAM: 4-bit model + ~1024x768 frames
+
 grui perception providers        # list providers and availability
 ```
+
+`--quantize 4bit|8bit` (bitsandbytes) cuts model VRAM to ~2-4 GB and
+`--max-pixels N` downscales frames before inference (a 4K frame is ~8 Mpx —
+the vision encoder's prefill is what OOMs smaller GPUs); boxes are
+automatically rescaled to original-frame coordinates in the results.
 ### a note on locateanything
 locate anything is not perfect. Try the free sample at [https://huggingface.co/spaces/nvidia/LocateAnything](https://huggingface.co/spaces/nvidia/LocateAnything), with a couple of prompts to try and get it to recognize some objects before running on your data:
 

@@ -34,6 +34,7 @@ _STATUS_COLORS: dict[str, QColor] = {
     "verified": QColor("#81c784"),
     "corrected": QColor("#ba68c8"),
     "rejected": QColor("#e57373"),
+    "prediction": QColor("#90a4ae"),  # unimported model candidate, drawn dashed
 }
 _DEFAULT_COLOR = QColor("#4fc3f7")
 _SELECT_COLOR = QColor("#ffd54f")
@@ -139,6 +140,7 @@ class AnnotationOverlay(QWidget):
                     self._drag = "box"
                     self._drag_start = (x, y)
                     self._drag_origin = (box.x1, box.y1, box.x2, box.y2)
+                self._select(box)
             else:
                 self._drag = "create"
                 self._drag_start = (x, y)
@@ -262,6 +264,8 @@ class AnnotationOverlay(QWidget):
         color = _STATUS_COLORS.get(box.status, _DEFAULT_COLOR)
         selected = box.id == self._selected_id
         pen = QPen(_SELECT_COLOR if selected else color, 2.0 if selected else 1.5)
+        if box.status == "prediction" and not selected:
+            pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)

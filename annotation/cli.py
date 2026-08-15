@@ -72,7 +72,11 @@ def _cmd_import(args: argparse.Namespace) -> int:
     if not cached.exists:
         print("error: no perception results — run `grui perception analyze` first", file=sys.stderr)
         return 1
-    imported = store.import_perception(cached.read_results())
+    recording = load_recording(directory)
+    imported = store.import_perception(
+        cached.read_results(),
+        frame_size=(recording.width, recording.height),
+    )
     store.save()
     print(f"imported {imported} model detections as annotations → {store.annotations_path}")
     return 0

@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from annotation.types import Annotation, AnnotationStatus, DetectionProvenance
+from perception.types import BoundingBox, Detection
 
 logger = logging.getLogger(__name__)
 
@@ -191,15 +193,22 @@ class AnnotationStore:
         self._dirty = True
         return annotation
 
-    def import_perception(self, results, *, source: str = "imported") -> int:
+    def import_perception(self, results, *, provider: str = "imported", frame_size: tuple[int, int] | None = None) -> int:
         """Import perception detections as annotations (proposals, not truth).
 
         ``results`` are :class:`~perception.runner.CachedAnalysis` read with
         ``read_results()`` (list of PerceptionResult). Each detection becomes
         one annotation with the original model output preserved in
-        ``prediction``. Existing annotations for the same (frame, label-ish)
-        detection are not duplicated on repeat imports.
+        ``prediction`` (``provider`` records where the proposal came from).
+        Existing annotations for the same (frame, label-ish) detection are
+        not duplicated on repeat imports.
+
+        Perception boxes are in absolute video pixels; annotations and the
+        overlay use normalized 0..1 coordinates, so pass ``frame_size``
+        ``(width, height)`` to convert at import time.
         """
+        if frame_size:
+            results = normalize_detection_results(results, *frame_size)
         imported = 0
         existing = {
             (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source)
@@ -207,8 +216,8 @@ class AnnotationStore:
         }
         for result in results:
             for detection in result.detections:
-                prediction = DetectionProvenance.from_detection(detection, source=source)
-                key = (result.frame_index, detection.label, source)
+                prediction = DetectionProvenance.from_detection(detection, provider=provider)
+                key = (result.frame_index, detection.label, provider)
                 if key in existing:
                     continue
                 existing.add(key)
@@ -223,9 +232,44 @@ class AnnotationStore:
                     prediction=prediction,
                 )
                 imported += 1
-        if imported:
-            self._record_history("import_perception", None)
         return imported
+
+    def import_detection(
+        self,
+        frame_index: int,
+        t: float,
+        detection: Detection,
+        *,
+        provider: str = "imported",
+        frame_size: tuple[int, int] | None = None,
+    ) -> Annotation | None:
+        """Import a single model detection as one draft annotation.
+
+        Deduplication matches :meth:`import_perception` (same frame, label
+        and provider), so clicking a model box that was already imported
+        returns ``None`` instead of creating a copy. Perception detections
+        are in video pixels; pass ``frame_size`` to store normalized boxes.
+        """
+        if frame_size:
+            detection = _normalize_detection(detection, *frame_size)
+        existing = {
+            (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source)
+            for a in self._annotations
+        }
+        key = (int(frame_index), detection.label, provider)
+        if key in existing:
+            return None
+        prediction = DetectionProvenance.from_detection(detection, provider=provider)
+        return self.create(
+            detection.label,
+            detection.bbox,
+            int(frame_index),
+            float(t),
+            source="model",
+            status=AnnotationStatus.PREDICTED,
+            confidence=detection.confidence,
+            prediction=prediction,
+        )
 
     # ------------------------------------------------------------ editing
 
@@ -325,6 +369,39 @@ def load_annotations(recording_dir: Path | str) -> AnnotationStore:
     """Load the annotation store for a raw recording directory."""
     root = Path(recording_dir)
     return AnnotationStore.load(root / "annotations")
+
+
+def _normalize_detection(detection: Detection, width: int, height: int) -> Detection:
+    """Clone a Detection with its bbox converted to normalized 0..1 coords."""
+    if detection.bbox is None or width <= 0 or height <= 0:
+        return detection
+    bbox = detection.bbox
+    return replace(
+        detection,
+        bbox=BoundingBox(
+            x1=bbox.x1 / width,
+            y1=bbox.y1 / height,
+            x2=bbox.x2 / width,
+            y2=bbox.y2 / height,
+        ),
+    )
+
+
+def normalize_detection_results(
+    results: list[Any], width: int, height: int
+) -> list[Any]:
+    """Clone PerceptionResults with detection bboxes normalized to 0..1."""
+    from perception.types import PerceptionResult
+
+    return [
+        PerceptionResult(
+            frame_index=result.frame_index,
+            t=result.t,
+            prompt=result.prompt,
+            detections=[_normalize_detection(d, width, height) for d in result.detections],
+        )
+        for result in results
+    ]
 
 
 def save_annotations(store: AnnotationStore) -> None:

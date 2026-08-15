@@ -122,6 +122,89 @@ def test_next_perception_skips_to_detections(window):
     assert window._current_t == pytest.approx(window._recording.frame_time(5))
 
 
+def test_perception_candidates_display_normalized(window):
+    """Pixel-space detections must be shown as normalized 0..1 overlay boxes."""
+    _write_perception(window._recording, {5: ["one"]})
+    window._load_perception(window._recording)
+    window._on_next_perception()  # lands on frame 5
+    window._show_perception.setChecked(True)
+    QApplication.processEvents()
+
+    overlay = window._annotation_overlay
+    assert not overlay.isHidden()  # explicitly asked Qt to show it
+    assert len(overlay._boxes) == 1
+    box = overlay._boxes[0]
+    assert box.id == "perception:5:0"
+    assert box.status == "prediction"
+    assert 0.0 <= box.x1 <= 1.0 and 0.0 <= box.y1 <= 1.0
+    assert 0.0 <= box.x2 <= 1.0 and 0.0 <= box.y2 <= 1.0
+
+
+def test_click_candidate_imports_and_selects(window):
+    _write_perception(window._recording, {5: ["one"]})
+    window._load_perception(window._recording)
+    window._on_next_perception()
+    window._show_perception.setChecked(True)
+    QApplication.processEvents()
+
+    box = window._annotation_overlay._boxes[0]
+    window._on_annotation_selected(box.id)
+
+    assert len(window._annotations) == 1
+    annotation = list(window._annotations)[0]
+    assert annotation.status.value == "predicted"
+    assert 0.0 <= annotation.bbox.x2 <= 1.0  # stored normalized, not raw pixels
+    assert window._selected_annotation_id == annotation.id
+    assert window._ann_label_edit.isEnabled()
+    assert window._ann_label_edit.text() == "one"
+
+    # clicking the same candidate again selects it, does not duplicate
+    window._on_annotation_selected(box.id)
+    assert len(window._annotations) == 1
+
+
+def test_show_views_are_exclusive(window):
+    _write_perception(window._recording, {5: ["one"]})
+    window._load_perception(window._recording)
+
+    window._show_annotations.setChecked(True)
+    assert window._show_perception.isChecked() is False
+    window._show_perception.setChecked(True)
+    assert window._show_annotations.isChecked() is False
+
+
+def test_annotation_view_detects_stale_pixel_boxes(window, monkeypatch):
+    """Boxes stored in raw pixels (pre-normalization files) still display."""
+    from perception.types import BoundingBox
+
+    _write_perception(window._recording, {5: ["one"]})
+    window._load_perception(window._recording)
+    window._on_next_perception()
+    window._show_perception.setChecked(True)
+    QApplication.processEvents()
+    window._on_annotation_selected(window._annotation_overlay._boxes[0].id)  # import
+
+    # rewrite the stored box to raw pixels, as old files contain
+    stored = list(window._annotations)[0]
+    frame_size = (window._recording.width, window._recording.height)
+    pixel = BoundingBox(
+        x1=stored.bbox.x1 * frame_size[0],
+        y1=stored.bbox.y1 * frame_size[1],
+        x2=stored.bbox.x2 * frame_size[0],
+        y2=stored.bbox.y2 * frame_size[1],
+    )
+    window._annotations.resize(stored.id, pixel)
+
+    window._show_annotations.setChecked(True)
+    window._on_next_perception()
+    QApplication.processEvents()
+    boxes = window._annotation_overlay._boxes
+    assert len(boxes) == 1
+    assert boxes[0].id == stored.id
+    assert boxes[0].x2 <= 1.0  # scaled down for display despite pixel storage
+    assert boxes[0].y2 <= 1.0
+
+
 def test_zoom_scales_display(window):
     base = window._video_label.pixmap().size()
     assert window._zoom_slider.value() == 100

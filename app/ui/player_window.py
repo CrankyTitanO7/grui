@@ -69,15 +69,6 @@ def _frame_to_pixmap(frame: np.ndarray, size: tuple[int, int]) -> QPixmap:
     )
 
 
-def _label_color(label: str) -> tuple[int, int, int]:
-    """Stable BGR color per prompt label, so detections stay identifiable."""
-    palette = [
-        (52, 152, 219), (231, 76, 60), (46, 204, 113), (241, 196, 15),
-        (155, 89, 182), (26, 188, 156), (230, 126, 34), (149, 165, 166),
-    ]
-    return palette[abs(hash(label)) % len(palette)]
-
-
 class PlayerWindow(QMainWindow):
     """Select a recording, play it with live key visualization, edit, save."""
 
@@ -166,6 +157,7 @@ class PlayerWindow(QMainWindow):
         self._timeline = TimelineWidget()
         self._timeline.seeked.connect(self._on_seek_requested)
         self._timeline.selectionChanged.connect(self._on_selection_changed)
+        self._timeline.annotationClicked.connect(self._on_annotation_tick_clicked)
         root.addWidget(self._timeline)
 
         transport = QHBoxLayout()
@@ -176,10 +168,15 @@ class PlayerWindow(QMainWindow):
         self._step_btn = QPushButton("⏭ Step")
         self._step_btn.clicked.connect(self._on_step)
         self._time_label = QLabel("0:00.000 / 0:00.000")
+        self._show_input = QCheckBox("Show input state")
+        self._show_input.setChecked(True)
+        self._show_input.setToolTip("Show/hide the keyboard monitor and mouse graph")
+        self._show_input.toggled.connect(self._keyboard_view.setVisible)
         transport.addWidget(self._play_btn)
         transport.addWidget(self._stop_btn)
         transport.addWidget(self._step_btn)
         transport.addWidget(self._time_label, 1)
+        transport.addWidget(self._show_input)
         root.addLayout(transport)
 
         zoom_row = QHBoxLayout()
@@ -259,6 +256,11 @@ class PlayerWindow(QMainWindow):
         overlay_row = QHBoxLayout()
         self._show_perception = QCheckBox("Show perception detections")
         self._show_perception.setChecked(False)
+        self._show_perception.setToolTip(
+            "Show all model detection boxes: dashed = not yet imported "
+            "(click to import as a draft annotation), solid = already imported. "
+            "Unchecks 'Show annotations' — the two views are exclusive."
+        )
         self._show_perception.toggled.connect(self._on_perception_toggled)
         self._perception_status = QLabel("")
         self._perception_status.setStyleSheet("color: #888888;")
@@ -274,6 +276,10 @@ class PlayerWindow(QMainWindow):
 
         ann_row = QHBoxLayout()
         self._show_annotations = QCheckBox("Show annotations")
+        self._show_annotations.setToolTip(
+            "Show the human annotation layer for this frame. Unchecks "
+            "'Show perception detections' — the two views are exclusive."
+        )
         self._show_annotations.toggled.connect(self._on_annotations_toggled)
         self._edit_annotations_btn = QPushButton("✎ Edit Annotations")
         self._edit_annotations_btn.setCheckable(True)
@@ -284,7 +290,8 @@ class PlayerWindow(QMainWindow):
         self._edit_annotations_btn.toggled.connect(self._on_annotation_mode_toggled)
         self._import_annotations_btn = QPushButton("← Import Perception")
         self._import_annotations_btn.setToolTip(
-            "Turn the current perception detections into (unreviewed) annotations"
+            "Import perception detections as draft annotations. Model predictions "
+            "are guesses — import frame-by-frame and correct/delete by hand."
         )
         self._import_annotations_btn.clicked.connect(self._on_import_annotations)
         self._annotation_status = QLabel("")
@@ -458,6 +465,7 @@ class PlayerWindow(QMainWindow):
         self._annotation_overlay.set_editing(False)
         self._annotation_overlay.set_annotations([])
         self._annotation_overlay.select_annotation(None)
+        self._annotation_overlay.hide()
 
     # --------------------------------------------------------- perception
 
@@ -483,27 +491,11 @@ class PlayerWindow(QMainWindow):
         self._next_perception_btn.setEnabled(bool(by_frame))
 
     def _on_perception_toggled(self, checked: bool) -> None:
-        if checked and not self._perception:
-            self._status("No perception detections loaded for this recording")
-
-    def _draw_perception_overlay(self, frame_index: int, frame: np.ndarray) -> np.ndarray:
-        """Draw detection boxes for the displayed frame (non-destructive)."""
-        detections = self._perception.get(frame_index)
-        if not detections or frame is None:
-            return frame
-        drawn = frame.copy()
-        for detection in detections:
-            box = detection.bbox
-            label = detection.label
-            color = _label_color(label)
-            pt1 = (int(round(box.x1)), int(round(box.y1)))
-            pt2 = (int(round(box.x2)), int(round(box.y2)))
-            cv2.rectangle(drawn, pt1, pt2, color, 2)
-            cv2.putText(
-                drawn, label, (pt1[0], max(0, pt1[1] - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
-            )
-        return drawn
+        if checked:
+            if not self._perception:
+                self._status("No perception detections loaded for this recording")
+            self._show_annotations.setChecked(False)
+        self._update_annotation_overlay()
 
     # ------------------------------------------------------------ playback
 
@@ -523,8 +515,6 @@ class PlayerWindow(QMainWindow):
         t = self._recording.frame_time(frame_index)
         self._current_t = t
         self._current_frame_index = frame_index
-        if self._show_perception.isChecked():
-            frame = self._draw_perception_overlay(frame_index, frame)
         self._current_frame = frame
         self._render_frame()
         self._update_annotation_overlay()
@@ -844,8 +834,37 @@ class PlayerWindow(QMainWindow):
 
     # --------------------------------------------------------- annotations
 
-    def _on_annotations_toggled(self, _checked: bool) -> None:
+    def _on_annotations_toggled(self, checked: bool) -> None:
+        if checked:
+            self._show_perception.setChecked(False)
         self._update_annotation_overlay()
+        self._refresh_timeline_view()
+
+    def _on_annotation_tick_clicked(self, t: float, kind: str, _label: str) -> None:
+        """Annotation clicked on the timeline: jump to its frame, select if human."""
+        if self._recording is None or self._session is None:
+            return
+        raw_t = t
+        for clip in self._session.timeline.clips:
+            if clip.start <= t < clip.start + clip.length:
+                raw_t = clip.source_time(t)
+                break
+        self._seek_to(raw_t)
+        self._current_t = raw_t
+        self._update_state_views(raw_t)
+        self._timeline.set_playhead(raw_t)
+        self._update_time_label()
+        if kind != "human" or self._annotations is None:
+            return
+        candidates = [a for a in self._annotations if abs(a.t - raw_t) < 0.05]
+        if not candidates:
+            candidates = sorted(
+                self._annotations,
+                key=lambda a: abs(a.t - raw_t),
+            )[:1]
+        if candidates:
+            self._on_annotation_selected(candidates[0].id)
+            self._annotation_overlay.select_annotation(candidates[0].id)
 
     def _on_annotation_mode_toggled(self, checked: bool) -> None:
         self._annotation_mode = checked
@@ -860,16 +879,92 @@ class PlayerWindow(QMainWindow):
         from perception.runner import CachedAnalysis
 
         cached = CachedAnalysis(self._recording.directory / "perception")
-        imported = self._annotations.import_perception(cached.read_results())
+        try:
+            results = cached.read_results()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("failed to read perception results")
+            QMessageBox.warning(self, "GRUI", f"Could not read perception results:\n{exc}")
+            return
+        total = sum(len(r.detections) for r in results)
+        frame_index = self._recording.nearest_frame_index(self._current_t)
+        in_frame = sum(len(r.detections) for r in results if r.frame_index == frame_index)
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Import Perception")
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(
+            f"Perception produced {total} detections total. Import them as draft "
+            "annotations that humans review, correct or delete?"
+        )
+        dialog.setInformativeText(
+            "Model predictions are guesses — most will need correction or removal.\n\n"
+            f"This frame has {in_frame} detections. Import just them to review "
+            "frame-by-frame, or import everything at once?"
+        )
+        current_btn = dialog.addButton("This frame only (recommended)", QMessageBox.ButtonRole.AcceptRole)
+        all_btn = dialog.addButton("All detections", QMessageBox.ButtonRole.ActionRole)
+        cancel_btn = dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(current_btn)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is cancel_btn or clicked is None:
+            return
+        if clicked is current_btn:
+            results = [r for r in results if r.frame_index == frame_index]
+        try:
+            imported = self._annotations.import_perception(
+                results, frame_size=(self._recording.width, self._recording.height)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("perception import failed")
+            QMessageBox.warning(self, "GRUI", f"Import failed:\n{exc}")
+            return
         self._save_annotations_state()
         if imported:
-            self._status(f"Imported {imported} perception detections as annotations")
+            self._status(f"Imported {imported} perception detections as draft annotations")
         else:
             self._status("No new annotations (all detections already imported)")
 
+    def _import_one_candidate(self, perception_id: str) -> Any:
+        """Click on an unimported model box: import it as a draft annotation."""
+        if self._recording is None or self._annotations is None:
+            return None
+        try:
+            _, frame_part, index_part = perception_id.split(":")
+            frame_index, detection_index = int(frame_part), int(index_part)
+        except ValueError:
+            return None
+        detections = self._perception.get(frame_index)
+        if not detections or not (0 <= detection_index < len(detections)):
+            return None
+        detection = detections[detection_index]
+        imported = self._annotations.import_detection(
+            frame_index,
+            self._recording.frame_time(frame_index),
+            detection,
+            frame_size=(self._recording.width, self._recording.height),
+        )
+        if imported is not None:
+            self._save_annotations_state()
+            self._status("Imported model box as a draft annotation — rename, verify or delete it")
+            return imported
+        existing = next(
+            (
+                a
+                for a in self._annotations.for_frame(frame_index)
+                if a.label == detection.label and a.prediction and a.prediction.provider == "imported"
+            ),
+            None,
+        )
+        if existing is not None:
+            self._status("This model box is already imported — selected the existing annotation")
+        return existing
+
     def _on_annotation_selected(self, annotation_id: str) -> None:
-        self._selected_annotation_id = annotation_id
         annotation = self._annotations.get(annotation_id) if self._annotations else None
+        if annotation is None and annotation_id.startswith("perception:"):
+            annotation = self._import_one_candidate(annotation_id)
+        self._selected_annotation_id = annotation.id if annotation else annotation_id
         if annotation is not None:
             self._ann_label_edit.setText(annotation.label)
             self._ann_label_edit.setEnabled(True)
@@ -879,13 +974,13 @@ class PlayerWindow(QMainWindow):
         self._update_annotation_status_text()
 
     def _on_annotation_moved(self, annotation_id: str, dx: float, dy: float) -> None:
-        if self._annotations is None:
+        if self._annotations is None or annotation_id.startswith("perception:"):
             return
         if self._annotations.move(annotation_id, dx, dy):
             self._save_annotations_state()
 
     def _on_annotation_resized(self, annotation_id: str, x1: float, y1: float, x2: float, y2: float) -> None:
-        if self._annotations is None:
+        if self._annotations is None or annotation_id.startswith("perception:"):
             return
         if self._annotations.resize(annotation_id, BoundingBox(x1, y1, x2, y2)):
             self._save_annotations_state()
@@ -966,23 +1061,79 @@ class PlayerWindow(QMainWindow):
         self._refresh_timeline_view()
         self._update_annotation_status_text()
 
+    def _candidate_boxes(
+        self, frame_index: int
+    ) -> list[tuple[str, str, str, tuple[float, float, float, float]]]:
+        """Model detections for a frame, drawn as clickable overlay boxes.
+
+        Unimported detections become dashed ``prediction`` boxes (clicking
+        one imports it). Already-imported detections are drawn solid with
+        their annotation id/status, so the perception view never appears
+        empty after an import.
+        """
+        annotations_by_key = {
+            (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source): a
+            for a in self._annotations
+        }
+        boxes = []
+        width = self._recording.width if self._recording else 0
+        height = self._recording.height if self._recording else 0
+        for i, detection in enumerate(self._perception.get(frame_index) or []):
+            annotation = annotations_by_key.get((frame_index, detection.label, "imported"))
+            bbox = detection.bbox
+            x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+            if width > 0 and height > 0:
+                x1, y1, x2, y2 = x1 / width, y1 / height, x2 / width, y2 / height
+            if annotation is not None:
+                boxes.append(
+                    (annotation.id, annotation.label or "(untitled)", annotation.status.value,
+                     (x1, y1, x2, y2))
+                )
+            else:
+                boxes.append(
+                    (f"perception:{frame_index}:{i}", detection.label, "prediction",
+                     (x1, y1, x2, y2))
+                )
+        return boxes
+
     def _update_annotation_overlay(self) -> None:
         if self._recording is None or self._annotations is None:
-            return
-        show = self._show_annotations.isChecked()
-        self._annotation_overlay.set_editing(show and self._annotation_mode)
-        if not show:
-            self._annotation_overlay.set_annotations([])
+            self._annotation_overlay.hide()
             return
         frame_index = self._recording.nearest_frame_index(self._current_t)
-        boxes = [
-            (a.id, a.label or "(untitled)", a.status.value, (a.bbox.x1, a.bbox.y1, a.bbox.x2, a.bbox.y2))
-            for a in self._annotations.for_frame(frame_index)
-        ]
+        show_annotations = self._show_annotations.isChecked()
+        show_candidates = self._show_perception.isChecked()
+        if not show_annotations and not (show_candidates and self._perception):
+            self._annotation_overlay.hide()
+            return
+        boxes: list[tuple[str, str, str, tuple[float, float, float, float]]] = []
+        if show_annotations:
+            boxes.extend(self._annotation_boxes(frame_index))
+        if show_candidates:
+            boxes.extend(self._candidate_boxes(frame_index))
+        self._annotation_overlay.set_editing(show_annotations and self._annotation_mode)
+        self._annotation_overlay.setVisible(True)
         if self._selected_annotation_id not in {b[0] for b in boxes}:
             self._annotation_overlay.select_annotation(None)
         self._annotation_overlay.set_annotations(boxes)
         self._annotation_overlay.raise_()
+
+    def _annotation_boxes(
+        self, frame_index: int
+    ) -> list[tuple[str, str, str, tuple[float, float, float, float]]]:
+        """Annotations for a frame; tolerates boxes stored in raw pixels."""
+        width = self._recording.width if self._recording else 0
+        height = self._recording.height if self._recording else 0
+        boxes = []
+        for a in self._annotations.for_frame(frame_index):
+            bbox = a.bbox
+            x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
+            if width > 0 and height > 0 and max(x1, y1, x2, y2) > 1.0:
+                x1, y1, x2, y2 = x1 / width, y1 / height, x2 / width, y2 / height
+            boxes.append(
+                (a.id, a.label or "(untitled)", a.status.value, (x1, y1, x2, y2))
+            )
+        return boxes
 
     def _update_annotation_status_text(self) -> None:
         annotations = self._annotations
@@ -1005,8 +1156,9 @@ class PlayerWindow(QMainWindow):
 
     def _annotation_ticks(self) -> list[tuple[float, str, str]]:
         """Timeline ticks: human annotations (kind human) + perception (prediction),
-        mapped through the edited timeline so deleted regions drop out."""
-        if self._recording is None or self._session is None:
+        mapped through the edited timeline so deleted regions drop out.
+        Hidden unless "Show annotations" is checked."""
+        if not self._show_annotations.isChecked() or self._recording is None or self._session is None:
             return []
         raw: list[dict[str, Any]] = []
         if self._annotations is not None:

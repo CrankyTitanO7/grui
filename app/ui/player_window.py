@@ -39,7 +39,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from annotation.store import AnnotationStore, load_annotations
+from annotation.store import (
+    AnnotationStore,
+    annotation_dedup_key,
+    detection_dedup_key,
+    load_annotations,
+)
 from annotation.types import AnnotationStatus
 from app.ui.annotation_overlay import AnnotationOverlay
 from app.ui.keyboard_view import KeyboardView
@@ -952,7 +957,7 @@ class PlayerWindow(QMainWindow):
             (
                 a
                 for a in self._annotations.for_frame(frame_index)
-                if a.label == detection.label and a.prediction and a.prediction.provider == "imported"
+                if annotation_dedup_key(a) == detection_dedup_key(frame_index, detection, "imported")
             ),
             None,
         )
@@ -1071,15 +1076,12 @@ class PlayerWindow(QMainWindow):
         their annotation id/status, so the perception view never appears
         empty after an import.
         """
-        annotations_by_key = {
-            (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source): a
-            for a in self._annotations
-        }
+        annotations_by_key = {annotation_dedup_key(a): a for a in self._annotations}
         boxes = []
         width = self._recording.width if self._recording else 0
         height = self._recording.height if self._recording else 0
         for i, detection in enumerate(self._perception.get(frame_index) or []):
-            annotation = annotations_by_key.get((frame_index, detection.label, "imported"))
+            annotation = annotations_by_key.get(detection_dedup_key(frame_index, detection, "imported"))
             bbox = detection.bbox
             x1, y1, x2, y2 = bbox.x1, bbox.y1, bbox.x2, bbox.y2
             if width > 0 and height > 0:

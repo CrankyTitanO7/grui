@@ -200,8 +200,9 @@ class AnnotationStore:
         ``read_results()`` (list of PerceptionResult). Each detection becomes
         one annotation with the original model output preserved in
         ``prediction`` (``provider`` records where the proposal came from).
-        Existing annotations for the same (frame, label-ish) detection are
-        not duplicated on repeat imports.
+        Dedup is per detection box — (frame, label, box, provider) — so two
+        same-label objects on one frame stay two individually editable
+        annotations; repeat imports of the same box are not duplicated.
 
         Perception boxes are in absolute video pixels; annotations and the
         overlay use normalized 0..1 coordinates, so pass ``frame_size``
@@ -210,14 +211,11 @@ class AnnotationStore:
         if frame_size:
             results = normalize_detection_results(results, *frame_size)
         imported = 0
-        existing = {
-            (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source)
-            for a in self._annotations
-        }
+        existing = {annotation_dedup_key(a) for a in self._annotations}
         for result in results:
             for detection in result.detections:
                 prediction = DetectionProvenance.from_detection(detection, provider=provider)
-                key = (result.frame_index, detection.label, provider)
+                key = detection_dedup_key(result.frame_index, detection, provider)
                 if key in existing:
                     continue
                 existing.add(key)
@@ -245,18 +243,17 @@ class AnnotationStore:
     ) -> Annotation | None:
         """Import a single model detection as one draft annotation.
 
-        Deduplication matches :meth:`import_perception` (same frame, label
-        and provider), so clicking a model box that was already imported
-        returns ``None`` instead of creating a copy. Perception detections
-        are in video pixels; pass ``frame_size`` to store normalized boxes.
+        Dedup matches :meth:`import_perception` — per detection box
+        (frame, label, box, provider) — so clicking an already-imported box
+        returns ``None`` instead of creating a copy, while a second
+        same-label box on the same frame imports independently.
+        Perception detections are in video pixels; pass ``frame_size`` to
+        store normalized boxes.
         """
         if frame_size:
             detection = _normalize_detection(detection, *frame_size)
-        existing = {
-            (a.frame_index, a.prediction.label if a.prediction else a.label, a.prediction.provider if a.prediction else a.source)
-            for a in self._annotations
-        }
-        key = (int(frame_index), detection.label, provider)
+        existing = {annotation_dedup_key(a) for a in self._annotations}
+        key = detection_dedup_key(frame_index, detection, provider)
         if key in existing:
             return None
         prediction = DetectionProvenance.from_detection(detection, provider=provider)
@@ -369,6 +366,31 @@ def load_annotations(recording_dir: Path | str) -> AnnotationStore:
     """Load the annotation store for a raw recording directory."""
     root = Path(recording_dir)
     return AnnotationStore.load(root / "annotations")
+
+
+def _rounded_box(bbox: BoundingBox | None) -> tuple | None:
+    if bbox is None:
+        return None
+    return (
+        round(bbox.x1, 1), round(bbox.y1, 1),
+        round(bbox.x2, 1), round(bbox.y2, 1),
+    )
+
+
+def annotation_dedup_key(annotation: Annotation) -> tuple:
+    """Identity of an annotation's origin box: (frame, label, box, provider)."""
+    if annotation.prediction is not None:
+        label, provider = annotation.prediction.label, annotation.prediction.provider
+        bbox = annotation.prediction.bbox
+    else:
+        label, provider = annotation.label, annotation.source
+        bbox = annotation.bbox
+    return (annotation.frame_index, label, _rounded_box(bbox), provider)
+
+
+def detection_dedup_key(frame_index: int, detection: Detection, provider: str) -> tuple:
+    """Dedup key for a model detection, matching :func:`annotation_dedup_key`."""
+    return (int(frame_index), detection.label, _rounded_box(detection.bbox), provider)
 
 
 def _normalize_detection(detection: Detection, width: int, height: int) -> Detection:

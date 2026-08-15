@@ -76,6 +76,36 @@ def test_import_perception_normalized_matches_single_normalized(store: Annotatio
     assert len(store) == 1
 
 
+def test_same_label_different_boxes_import_individually(store: AnnotationStore) -> None:
+    """Two same-label objects on one frame must be two editable annotations."""
+    results = [
+        PerceptionResult(
+            frame_index=5, t=1.0, prompt="p",
+            detections=[
+                Detection(label="enemy", bbox=BoundingBox(0, 0, 50, 50)),
+                Detection(label="enemy", bbox=BoundingBox(100, 0, 150, 50)),
+            ],
+        )
+    ]
+    assert store.import_perception(results) == 2
+    assert len(store.for_frame(5)) == 2
+
+    # dedup is per box: re-importing one box only skips that one
+    single = PerceptionResult(
+        frame_index=5, t=1.0, prompt="p",
+        detections=[Detection(label="enemy", bbox=BoundingBox(0, 0, 50, 50))],
+    )
+    assert store.import_perception([single]) == 0
+    assert len(store.for_frame(5)) == 2
+    assert store.import_detection(5, 1.0, Detection(label="enemy", bbox=BoundingBox(100, 0, 150, 50))) is None
+
+    # renaming one leaves the other untouched
+    anns = store.for_frame(5)
+    store.rename(anns[0].id, "boss")
+    labels = {a.label for a in store.for_frame(5)}
+    assert labels == {"boss", "enemy"}
+
+
 def test_import_perception_batch_counts_only_new(store: AnnotationStore) -> None:
     results = [
         PerceptionResult(

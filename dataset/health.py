@@ -431,6 +431,14 @@ def render_quality_report(recording: RecordingData, issues: list[QualityIssue]) 
 
 
 def analyze_recordings(root: Path | str) -> tuple[DatasetStatistics, list[RecordingStats]]:
-    """Statistics over every recording under ``root``."""
-    recordings = [load_recording(p) for p in list_recordings(root)]
+    """Statistics over every recording under ``root`` (or ``root`` itself).
+
+    ``root`` may be a recordings root directory or a single recording
+    directory — both are accepted, mirroring the full dataset layer.
+    """
+    root = Path(root)
+    if (root / "metadata.json").exists():
+        recordings = [load_recording(root)]
+    else:
+        recordings = [load_recording(p) for p in list_recordings(root)]
     return dataset_statistics(recordings), [recording_statistics(r) for r in recordings]

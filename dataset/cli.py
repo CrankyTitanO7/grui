@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -123,6 +124,32 @@ def build_parser() -> argparse.ArgumentParser:
     rdecide.add_argument("recording_dir")
     rdecide.add_argument("frame", type=int)
     rdecide.add_argument("verdict", choices=("accept", "reject", "skip"))
+
+    coverage = sub.add_parser(
+        "coverage",
+        help="coverage analysis: which situations are represented, and how well",
+    )
+    coverage.add_argument(
+        "root",
+        help="recordings root directory, or a single recording directory",
+    )
+    coverage.add_argument(
+        "--source", default="auto", choices=("auto", "annotations", "perception"),
+        help="label layer to analyse (default: annotations if present, else perception)",
+    )
+    coverage.add_argument(
+        "--min-demos", type=int, default=2,
+        help="flag situations present in fewer than N demonstrations (default: 2)",
+    )
+    coverage.add_argument(
+        "--max-situations", type=int, default=15,
+        help="most common situations to list (default: 15)",
+    )
+    coverage.add_argument(
+        "--only", action="append", default=None, metavar="NAME",
+        help="only analyse recordings with this directory name (repeatable)",
+    )
+    coverage.add_argument("--json", action="store_true", help="output raw counts as JSON")
     return parser
 
 
@@ -182,7 +209,13 @@ def _cmd_health(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(render_dataset_statistics(stats))
-    if per_demo and len([r for r in per_demo if r.duration < 5]) > max(1, len(per_demo) // 2):
+    if not per_demo:
+        print(
+            f"no recordings found under {args.root} "
+            "(is it a recordings root?)",
+            file=sys.stderr,
+        )
+    elif len([r for r in per_demo if r.duration < 5]) > max(1, len(per_demo) // 2):
         print("\n⚠ most demonstrations are under 5s — the dataset may be too sparse.")
     return 0
 
@@ -354,6 +387,45 @@ def _cmd_split(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_coverage(args: argparse.Namespace) -> int:
+    from dataset.coverage import analyze, render_report, report_to_dict
+
+    if (Path(args.root) / "metadata.json").exists():
+        try:
+            recordings = [load_recording(args.root)]
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        try:
+            recordings = [load_recording(p) for p in list_recordings(args.root)]
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if args.only:
+        wanted = set(args.only)
+        recordings = [
+            r for r in recordings
+            if r.directory.name in wanted or r.session_id in wanted
+        ]
+    try:
+        report = analyze(recordings, source=args.source)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report_to_dict(report), indent=2, sort_keys=True))
+        return 0
+    print(
+        render_report(
+            report,
+            min_demos=args.min_demos,
+            max_situations=args.max_situations,
+        )
+    )
+    return 0
+
+
 def _cmd_review_handler(args: argparse.Namespace) -> int:
     from dataset.review import ReviewQueue
 
@@ -414,4 +486,6 @@ def run(argv: list[str] | None = None) -> int:
         return _cmd_split(args)
     if args.command == "review":
         return _cmd_review_handler(args)
+    if args.command == "coverage":
+        return _cmd_coverage(args)
     return 2

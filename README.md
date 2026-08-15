@@ -68,6 +68,31 @@ grui dataset build <recording_dir> --out ./dataset
 See `grui dataset build --help` for the observation window, FPS, stride and
 prediction-horizon options; `dataset/README.md` documents the output format.
 
+### Dataset quality & review tools
+
+```bash
+grui dataset health <recordings_root>      # stats: demos, duration, frames, annotations
+grui dataset actions <recording_dir>       # action distribution + chords
+grui dataset report <recording_dir>        # quality report: gaps, idle, imbalance, ...
+grui dataset coverage <root>               # situation coverage: labels per frame, per demo
+grui dataset review build <recording_dir>  # active-learning queue (uncertainty, rarity, ...)
+grui dataset review list <recording_dir>   # pending candidates with priorities
+grui dataset review decide <dir> <frame> accept|reject|skip
+```
+
+`grui dataset coverage` derives "situations" (the set of labels present on
+a frame) from the annotation layer when it exists, else from perception
+results (`--source annotations|perception|auto`), then reports situation
+coverage, label presence, a per-demonstration matrix, and under-covered
+situations (`--min-demos` sets the floor). `--json` dumps raw counts.
+
+The player also has a **Review…** button: it rebuilds the review queue and
+lists pending candidates (frame, reason, priority). **⏭ Jump to frame**
+seeks the player to the candidate, **✓ Accept** verifies the frame's model
+annotations, **✕ Reject** marks them rejected, **Skip** leaves them alone —
+all persisted under `<recording>/review/queue.jsonl` (derived data; raw
+recordings are never touched).
+
 ## Training & agents
 
 Train a behavior-cloning policy on one or more datasets and run it:

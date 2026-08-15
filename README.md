@@ -152,6 +152,35 @@ draft annotation), solid boxes are already imported (click to select them).
 Perception is an extension — GRUI's core remains general-purpose human
 demonstration recording and imitation-learning dataset generation.
 
+### Event discovery
+
+Once a recording has annotations or perception results, GRUI can derive
+high-level events from the sighting track — for example "boss appears" →
+"boss disappears" while a "projectile" episode runs. This is a simple,
+extensible rule framework (`EventRule`): sightings are grouped per label
+into presence clusters, and each built-in rule emits events:
+
+* `appearance` — the label showed up (instant boundary at the cluster start);
+* `disappearance` — a presence episode that ended (span over the cluster).
+
+By default sightings prefer the **annotation store** (human-verified truth)
+and fall back to the raw **perception results**; use `--source` to force
+one. Events are derived data — they land in
+`<recording>/perception/events.jsonl` and the raw recording is never
+modified.
+
+```bash
+grui perception events <recording>              # default: all rules, gap 2 s
+grui perception events <recording> --rule appearance --rule disappearance \
+    --gap 3.0 --source annotations              # explicit source + clustering gap
+grui perception events <recording> --json       # machine-readable output
+```
+
+The player loads these events automatically: **⚡ Events** lists them
+(select one to jump to its start frame), and they appear on the timeline as
+orange squares in the annotation lane when **Show annotations** is
+checked.
+
 ## Player & editor
 
 Click **Open Player** in the main window to browse saved recordings:

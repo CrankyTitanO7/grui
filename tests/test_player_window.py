@@ -451,6 +451,87 @@ def test_no_selection_warns(window, monkeypatch):
     assert all(args[1] == "No Selection" for args in warnings)
 
 
+# ---------------------------------------------------------------- events UI
+
+def _write_events(recording, events):
+    from perception.events import write_events
+
+    write_events(recording.directory, events)
+
+
+def test_events_loaded_into_combo_and_timeline(window):
+    from perception.events import Event
+
+    _write_events(window._recording, [
+        Event(kind="appearance", label="boss", start_t=0.4, end_t=0.4,
+              start_frame=4, end_frame=4, detail={}),
+        Event(kind="disappearance", label="projectile", start_t=1.2, end_t=1.5,
+              start_frame=12, end_frame=15, detail={"duration_s": 0.3}),
+    ])
+    window._load_events()
+
+    assert len(window._events) == 2
+    assert window._events_combo.count() == 2
+    assert "boss" in window._events_combo.itemText(0)
+    assert "1.20s-1.50s" in window._events_combo.itemText(1)
+    assert "2 derived event(s)" in window._events_status.text()
+
+    window._show_annotations.setChecked(True)  # the lane is gated by this toggle
+    window._refresh_timeline_view()
+    kinds = [kind for _, kind, _ in window._timeline._annotation_ticks]
+    assert kinds.count("event") == 2
+    assert kinds.count("human") == 0
+    assert not window._timeline.grab().isNull()  # orange event squares render
+
+
+def test_events_combo_jumps_to_event_start(window):
+    from perception.events import Event
+
+    _write_events(window._recording, [
+        Event(kind="appearance", label="boss", start_t=0.4, end_t=0.4,
+              start_frame=4, end_frame=4, detail={}),
+        Event(kind="disappearance", label="projectile", start_t=1.2, end_t=1.5,
+              start_frame=12, end_frame=15, detail={}),
+    ])
+    window._load_events()
+    window._events_combo.setCurrentIndex(1)
+    QApplication.processEvents()
+
+    assert window._current_t == pytest.approx(1.2)
+    assert abs(window._timeline._playhead - 1.2) < 0.11  # one frame duration
+    assert window._recording.nearest_frame_index(1.2) == 12
+    assert not window._playing
+
+
+def test_events_ticks_drop_out_of_edited_regions(window):
+    """Event ticks are remapped like annotations: deleted regions drop out."""
+    from perception.events import Event
+
+    _write_events(window._recording, [
+        Event(kind="appearance", label="early", start_t=0.05, end_t=0.05,
+              start_frame=0, end_frame=0, detail={}),
+        Event(kind="appearance", label="late", start_t=2.5, end_t=2.5,
+              start_frame=25, end_frame=25, detail={}),
+    ])
+    window._load_events()
+    window._show_annotations.setChecked(True)
+    window._refresh_timeline_view()
+    kept = [0.05, 2.5]
+    assert sorted(round(tick[0], 2) for tick in window._timeline._annotation_ticks) == kept
+
+    # cut the first half of the recording away -> the early event disappears
+    window._on_selection_changed((0.0, 1.5))
+    window._on_cut()
+    assert window._timeline._annotation_ticks  # late event survived
+    assert all(tick[0] > 0.5 for tick in window._timeline._annotation_ticks)
+
+
+def test_events_row_empty_without_recording(tmp_path):
+    win = PlayerWindow(recordings_root=str(tmp_path / "root"))
+    assert win._events_combo.isEnabled() is False
+    win.close()
+
+
 def test_save_creates_new_recording(window, tmp_path, monkeypatch):
     before = set(list_recordings(tmp_path / "root"))
     monkeypatch.setattr(

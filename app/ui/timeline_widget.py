@@ -9,11 +9,13 @@ key and its timestamp in the label at the bottom. Colors:
 * markers    — yellow diamonds
 * keyboard events — yellow dots
 * annotation ticks — cyan diamonds (perception) / green triangles (human)
+* event ticks — orange squares (derived high-level events)
 * selection  — translucent orange with bright edge borders + duration label
 * playhead   — red line
 
-Annotation ticks sit in a thin lane under the main plot; clicking one
-emits ``annotationClicked(t, kind, label)`` instead of seeking.
+Annotation/event ticks sit in a thin lane under the main plot; clicking
+one emits ``annotationClicked(t, kind, label)`` instead of seeking
+(``kind`` is ``prediction`` | ``human`` | ``event``).
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ _RULER_COLOR = QColor(170, 170, 170)
 _KEY_EVENT_COLOR = QColor(241, 196, 15)
 _ANNOTATION_COLOR = QColor(26, 188, 156)  # cyan — human annotation
 _PREDICTION_COLOR = QColor(150, 111, 214)  # purple — model proposal
+_EVENT_COLOR = QColor(230, 126, 34)  # orange — derived high-level event
 
 _DRAG_THRESHOLD_PX = 4.0
 
@@ -224,7 +227,7 @@ class TimelineWidget(QWidget):
             painter.drawEllipse(QPointF(plot.left() + t * scale, y), 2.5, 2.5)
 
     def _draw_annotation_lane(self, painter: QPainter, plot: QRectF) -> None:
-        """Thin lane at the bottom: model predictions (purple) + human annotations (cyan)."""
+        """Thin lane at the bottom: predictions (purple), human (cyan), events (orange)."""
         if not self._annotation_ticks or self._duration <= 0:
             return
         scale = plot.width() / self._duration
@@ -241,6 +244,9 @@ class TimelineWidget(QWidget):
                         QPointF(x, y + 3), QPointF(x + 3, y),
                     ]
                 )
+            elif kind == "event":
+                painter.setBrush(_EVENT_COLOR)
+                painter.drawRect(QRectF(x - 3, y - 3, 6, 6))
             else:
                 painter.setBrush(_ANNOTATION_COLOR)
                 painter.drawPolygon(

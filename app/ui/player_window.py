@@ -51,6 +51,7 @@ from app.ui.keyboard_view import KeyboardView
 from app.ui.timeline_widget import TimelineWidget
 from editor.export import export_recording
 from editor.timeline import EditSession, remap_events
+from perception.events import Event, read_events
 from perception.types import BoundingBox
 from player.event_state import KeyStateTimeline
 from player.video_reader import VideoReader
@@ -100,6 +101,7 @@ class PlayerWindow(QMainWindow):
         self._annotations: AnnotationStore | None = None
         self._selected_annotation_id: str | None = None
         self._annotation_mode = False
+        self._events: list[Event] = []
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -335,6 +337,21 @@ class PlayerWindow(QMainWindow):
         edit_ann_row.addStretch(1)
         root.addLayout(edit_ann_row)
 
+        events_row = QHBoxLayout()
+        self._events_label = QLabel("⚡ Events:")
+        self._events_combo = QComboBox()
+        self._events_combo.setToolTip(
+            "Derived high-level events (perception/events.jsonl) — select one to jump to it"
+        )
+        self._events_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._events_combo.currentIndexChanged.connect(self._on_event_selected)
+        self._events_status = QLabel("")
+        self._events_status.setStyleSheet("color: #888888;")
+        events_row.addWidget(self._events_label)
+        events_row.addWidget(self._events_combo)
+        events_row.addWidget(self._events_status, 1)
+        root.addLayout(events_row)
+
         self.setCentralWidget(central)
         for button in central.findChildren(QPushButton):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -358,6 +375,7 @@ class PlayerWindow(QMainWindow):
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
             self._dataset_btn, self._perception_btn,
             self._show_annotations, self._edit_annotations_btn,
+            self._events_combo, self._events_label,
         ):
             widget.setEnabled(enabled)
 
@@ -448,6 +466,7 @@ class PlayerWindow(QMainWindow):
         self._set_enabled(True)
         self._load_perception(recording)
         self._refresh_annotation_view()
+        self._load_events()
         self.setWindowTitle(f"Recording Player — {recording.directory.name}")
         self._seek_to(0.0)
         self._status(f"Loaded {recording.directory.name}")
@@ -465,6 +484,11 @@ class PlayerWindow(QMainWindow):
         self._annotations = None
         self._selected_annotation_id = None
         self._annotation_mode = False
+        self._events = []
+        self._events_combo.blockSignals(True)
+        self._events_combo.clear()
+        self._events_combo.blockSignals(False)
+        self._events_status.setText("")
         self._edit_annotations_btn.setChecked(False)
         self._show_annotations.setChecked(False)
         self._annotation_overlay.set_editing(False)
@@ -836,6 +860,53 @@ class PlayerWindow(QMainWindow):
         if self._recording is not None:
             self._load_perception(self._recording)
             self._refresh_annotation_view()
+            self._load_events()
+
+    # ------------------------------------------------------------- events
+
+    def _load_events(self) -> None:
+        """Load derived events (perception/events.jsonl) into the navigation combo."""
+        if self._recording is None:
+            return
+        self._events = read_events(self._recording.directory)
+        self._events_combo.blockSignals(True)
+        self._events_combo.clear()
+        for event in self._events:
+            span = (
+                f"{event.start_t:.2f}s" if event.end_t == event.start_t
+                else f"{event.start_t:.2f}s-{event.end_t:.2f}s"
+            )
+            self._events_combo.addItem(f"{event.kind} {event.label} @ {span}", event)
+        self._events_combo.blockSignals(False)
+        if self._events:
+            self._events_status.setText(f"{len(self._events)} derived event(s)")
+        else:
+            self._events_status.setText(
+                "No events — run `grui perception events` to detect them"
+            )
+        self._refresh_timeline_view()
+
+    def _on_event_selected(self, index: int) -> None:
+        """Jump from the Events combo to the event's start frame."""
+        if index < 0 or index >= len(self._events) or self._recording is None:
+            return
+        event = self._events[index]
+        raw_t = event.start_t
+        self._seek_to(raw_t)
+        self._current_t = raw_t
+        self._update_state_views(raw_t)
+        self._timeline.set_playhead(self._raw_to_edited(raw_t))
+        self._update_time_label()
+        self._status(f"Event: {event.kind} {event.label} at {event.start_t:.2f}s")
+
+    def _raw_to_edited(self, t: float) -> float:
+        """Map a raw recording time to the edited timeline (identity when unedited)."""
+        if self._session is None:
+            return t
+        for clip in self._session.timeline.clips:
+            if clip.source_start <= t < clip.source_end:
+                return clip.edited_time(t)
+        return t
 
     # --------------------------------------------------------- annotations
 
@@ -845,8 +916,8 @@ class PlayerWindow(QMainWindow):
         self._update_annotation_overlay()
         self._refresh_timeline_view()
 
-    def _on_annotation_tick_clicked(self, t: float, kind: str, _label: str) -> None:
-        """Annotation clicked on the timeline: jump to its frame, select if human."""
+    def _on_annotation_tick_clicked(self, t: float, kind: str, label: str) -> None:
+        """Annotation/tick clicked on the timeline: jump to its frame, select if human."""
         if self._recording is None or self._session is None:
             return
         raw_t = t
@@ -859,6 +930,16 @@ class PlayerWindow(QMainWindow):
         self._update_state_views(raw_t)
         self._timeline.set_playhead(raw_t)
         self._update_time_label()
+        if kind == "event":
+            for event in self._events:
+                if abs(event.start_t - raw_t) < 0.05:
+                    self._status(
+                        f"Event: {event.kind} {event.label} {event.start_t:.2f}s"
+                        f"-{event.end_t:.2f}s (frames {event.start_frame}-{event.end_frame})"
+                    )
+                    return
+            self._status(f"Event: {label} at {raw_t:.2f}s")
+            return
         if kind != "human" or self._annotations is None:
             return
         candidates = [a for a in self._annotations if abs(a.t - raw_t) < 0.05]
@@ -1169,6 +1250,8 @@ class PlayerWindow(QMainWindow):
         for frame_index in sorted(self._perception):
             t = self._recording.frame_time(frame_index)
             raw.append({"t": t, "kind": "prediction", "label": "perception"})
+        for event in self._events:
+            raw.append({"t": event.start_t, "kind": "event", "label": f"{event.kind} {event.label}"})
         ticks = []
         for item in remap_events(raw, self._session.timeline):
             ticks.append((float(item["t"]), str(item["kind"]), str(item.get("label") or "")))

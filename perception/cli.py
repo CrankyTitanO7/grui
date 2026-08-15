@@ -4,10 +4,12 @@ Analyzes existing recordings with an optional perception provider::
 
     grui perception providers
     grui perception analyze <recording> --provider locate_anything --prompt "boss" --fps 2
+    grui perception events <recording>
 
 Analysis is a derived operation: it never touches the raw recording,
 ``events.jsonl`` or the video. Results land in
-``<recording>/perception/{manifest.json,results.jsonl}``.
+``<recording>/perception/{manifest.json,results.jsonl}``; derived events
+land in ``<recording>/perception/events.jsonl``.
 """
 
 from __future__ import annotations
@@ -18,6 +20,15 @@ import sys
 
 from perception import get, list_providers, provider_info
 from perception.base import with_options
+from perception.events import (
+    available_rules,
+    detect_events,
+    load_sightings,
+    read_events,
+    render_events,
+    write_events,
+    make_rules,
+)
 from perception.runner import analyze_recording
 from storage.recording import load_recording
 
@@ -65,6 +76,34 @@ def build_parser() -> argparse.ArgumentParser:
                               "size in the results")
     analyze.add_argument("--force", action="store_true",
                          help="re-run even if matching cached results exist")
+
+    events = sub.add_parser(
+        "events",
+        help="derive high-level events from annotations/perception (e.g. appearance/disappearance)",
+    )
+    events.add_argument("recording_dir", help="raw recording directory")
+    events.add_argument(
+        "--source", default="auto", choices=("auto", "annotations", "perception"),
+        help="sighting source: annotations (preferred) or raw perception results "
+             "(default: annotations if present, else perception)",
+    )
+    events.add_argument(
+        "--gap", type=float, default=2.0, metavar="S",
+        help="seconds without a sighting that split a label into separate "
+             "presence clusters (default: 2.0)",
+    )
+    events.add_argument(
+        "--rule", action="append", metavar="NAME",
+        help=f"event rule to run (repeatable; default: all — {', '.join(available_rules())})",
+    )
+    events.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print machine-readable events instead of the summary",
+    )
+    events.add_argument(
+        "--dry-run", action="store_true",
+        help="print what would be detected without writing events.jsonl",
+    )
     return parser
 
 
@@ -141,10 +180,39 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_events(args: argparse.Namespace) -> int:
+    try:
+        sightings = load_sightings(args.recording_dir, args.source)
+        rules = make_rules(args.rule, gap_s=args.gap)
+    except FileNotFoundError as exc:
+        print(f"No sightings — {exc}")
+        return 0
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not sightings:
+        print("No sightings available — annotate the recording or run perception first.")
+        return 0
+    events = detect_events(sightings, rules)
+    if not args.as_json:
+        print(render_events(events))
+    else:
+        print(json.dumps([e.to_dict() for e in events], indent=2))
+    if not args.dry_run:
+        try:
+            write_events(args.recording_dir, events)
+        except OSError as exc:
+            print(f"error: could not write events.jsonl: {exc}", file=sys.stderr)
+            return 1
+    return 0
+
+
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "providers":
         return _cmd_providers(args)
     if args.command == "analyze":
         return _cmd_analyze(args)
+    if args.command == "events":
+        return _cmd_events(args)
     return 2

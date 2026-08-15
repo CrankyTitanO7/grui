@@ -48,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
                          help="process every Nth frame (alternative to --fps)")
     analyze.add_argument("--device", default=None,
                          help="override the provider's default device, e.g. cuda:1 or cpu")
+    analyze.add_argument("--model", default=None, metavar="PATH",
+                         help="model weights file (yolo provider only, e.g. yolov8n.pt)")
+    analyze.add_argument("--conf", type=float, default=None,
+                         help="confidence threshold (yolo provider only, default: 0.25)")
+    analyze.add_argument("--allow-download", action="store_true",
+                         help="let ultralytics download the weights if missing (yolo only); "
+                              "off by default: GRUI never downloads weights silently")
     analyze.add_argument("--quantize", default=None, choices=("none", "8bit", "4bit"),
                          help="bitsandbytes weight quantization to cut VRAM: "
                               "8bit ~4 GB, 4bit ~2 GB (needs transformers+bitsandbytes)")
@@ -91,7 +98,12 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         return 1
     try:
         provider = with_options(
-            get(args.provider), device=args.device, quantize=args.quantize
+            get(args.provider),
+            device=args.device,
+            model=args.model,
+            conf=args.conf,
+            allow_download=args.allow_download,
+            quantize=args.quantize,
         )
     except KeyError as exc:
         print(f"error: {exc}", file=sys.stderr)

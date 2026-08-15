@@ -8,8 +8,12 @@ key and its timestamp in the label at the bottom. Colors:
 * clips      — dark slate with visible borders
 * markers    — yellow diamonds
 * keyboard events — yellow dots
+* annotation ticks — cyan diamonds (perception) / green triangles (human)
 * selection  — translucent orange with bright edge borders + duration label
 * playhead   — red line
+
+Annotation ticks sit in a thin lane under the main plot; clicking one
+emits ``annotationClicked(t, kind, label)`` instead of seeking.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 _PAD = 8
 _RULER_H = 16
 _LABEL_H = 16
+_ANNOTATION_LANE_H = 10
 _HOVER_RADIUS_PX = 6.0
 _CLIP_COLOR = QColor(58, 76, 92)
 _CLIP_EDGE = QColor(120, 150, 170)
@@ -37,6 +42,8 @@ _PLAYHEAD_COLOR = QColor(231, 76, 60)
 _MARKER_COLOR = QColor(241, 196, 15)
 _RULER_COLOR = QColor(170, 170, 170)
 _KEY_EVENT_COLOR = QColor(241, 196, 15)
+_ANNOTATION_COLOR = QColor(26, 188, 156)  # cyan — human annotation
+_PREDICTION_COLOR = QColor(150, 111, 214)  # purple — model proposal
 
 _DRAG_THRESHOLD_PX = 4.0
 
@@ -61,11 +68,12 @@ class TimelineWidget(QWidget):
 
     seeked = Signal(float)
     selectionChanged = Signal(object)
+    annotationClicked = Signal(float, str, str)  # (t, kind, label); kind in prediction|human
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(84)
-        self.setMaximumHeight(110)
+        self.setMaximumHeight(128)
         self.setMouseTracking(True)
         self._timeline: Timeline | None = None
         self._duration = 0.0
@@ -73,6 +81,7 @@ class TimelineWidget(QWidget):
         self._selection: tuple[float, float] | None = None
         self._markers: list[tuple[float, str]] = []
         self._events: list[tuple[float, str]] = []  # (t, key code)
+        self._annotation_ticks: list[tuple[float, str, str]] = []  # (t, kind, label)
         self._hovered: tuple[float, str] | None = None
         self._drag_start_x: float | None = None
         self._drag_start_t: float | None = None
@@ -99,6 +108,11 @@ class TimelineWidget(QWidget):
         self._events = sorted(events)
         self.update()
 
+    def set_annotation_ticks(self, ticks: list[tuple[float, str, str]]) -> None:
+        """Annotation ticks: (t, kind, label); kind in {'prediction', 'human'}."""
+        self._annotation_ticks = sorted(ticks)
+        self.update()
+
     def set_selection(self, selection: tuple[float, float] | None) -> None:
         self._selection = selection
         self.update()
@@ -111,7 +125,7 @@ class TimelineWidget(QWidget):
 
     def _plot_rect(self) -> QRectF:
         rect = QRectF(self.rect())
-        return rect.adjusted(_PAD, _RULER_H + 4, -_PAD, -_LABEL_H - 4)
+        return rect.adjusted(_PAD, _RULER_H + 4, -_PAD, -_LABEL_H - _ANNOTATION_LANE_H - 6)
 
     def _x_to_t(self, x: float) -> float:
         plot = self._plot_rect()
@@ -133,6 +147,7 @@ class TimelineWidget(QWidget):
         self._draw_markers(painter, plot)
         self._draw_selection(painter, plot)
         self._draw_events(painter, plot)
+        self._draw_annotation_lane(painter, plot)
         self._draw_playhead(painter, plot)
         painter.end()
 
@@ -208,6 +223,48 @@ class TimelineWidget(QWidget):
         for t, _ in self._events:
             painter.drawEllipse(QPointF(plot.left() + t * scale, y), 2.5, 2.5)
 
+    def _draw_annotation_lane(self, painter: QPainter, plot: QRectF) -> None:
+        """Thin lane at the bottom: model predictions (purple) + human annotations (cyan)."""
+        if not self._annotation_ticks or self._duration <= 0:
+            return
+        scale = plot.width() / self._duration
+        lane = QRectF(plot.left(), plot.bottom() + 3, plot.width(), _ANNOTATION_LANE_H)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for t, kind, _ in self._annotation_ticks:
+            x = lane.left() + t * scale
+            y = lane.center().y()
+            if kind == "prediction":
+                painter.setBrush(_PREDICTION_COLOR)
+                painter.drawPolygon(
+                    [
+                        QPointF(x, y - 3), QPointF(x - 3, y),
+                        QPointF(x, y + 3), QPointF(x + 3, y),
+                    ]
+                )
+            else:
+                painter.setBrush(_ANNOTATION_COLOR)
+                painter.drawPolygon(
+                    [QPointF(x, y - 3.5), QPointF(x - 3.5, y + 2), QPointF(x + 3.5, y + 2)]
+                )
+
+    def _nearest_annotation_tick(self, x: float, y: float) -> tuple[float, str, str] | None:
+        """Tick nearest to (x, y) if the click landed in the annotation lane."""
+        if not self._annotation_ticks or self._duration <= 0:
+            return None
+        plot = self._plot_rect()
+        lane = QRectF(plot.left(), plot.bottom() + 3, plot.width(), _ANNOTATION_LANE_H)
+        if not lane.contains(x, y):
+            return None
+        scale = plot.width() / self._duration
+        best: tuple[float, str, str] | None = None
+        best_d = _HOVER_RADIUS_PX
+        for t, kind, label in self._annotation_ticks:
+            distance = abs(plot.left() + t * scale - x)
+            if distance < best_d:
+                best_d = distance
+                best = (t, kind, label)
+        return best
+
     def _draw_playhead(self, painter: QPainter, plot: QRectF) -> None:
         if self._duration <= 0:
             return
@@ -245,6 +302,12 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            tick = self._nearest_annotation_tick(event.position().x(), event.position().y())
+            if tick is not None:
+                t, kind, label = tick
+                self.annotationClicked.emit(t, kind, label)
+                event.accept()
+                return
             self._drag_start_x = event.position().x()
             self._drag_start_t = self._x_to_t(self._drag_start_x)
             self._drag_active = False

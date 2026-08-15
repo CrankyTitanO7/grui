@@ -38,6 +38,13 @@ locate = [
     "bitsandbytes",
 ]
 
+# Optional perception provider: YOLO (perception/providers/yolo.py). GRUI
+# never downloads YOLO weights — provide your own .pt file (e.g. yolov8n.pt
+# from https://github.com/ultralytics/assets/releases).
+yolo = [
+    "ultralytics>=8.2",
+]
+
 # locate-anything 0.1.0 pins numpy==2.0.2 and Pillow==11.1.0, which have no
 # Python 3.14 Windows wheels (and no compiler on most Windows setups), so the
 # [locate] extra can't be installed there without these overrides. numpy 2.x
@@ -49,11 +56,12 @@ override-dependencies = ["numpy>=2.1", "Pillow>=11.2"]
 grui = "app.main:main"
 
 [tool.setuptools.packages.find]
-include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*", "ml*", "perception*"]
+include = ["app*", "recorder*", "storage*", "dataset*", "editor*", "player*", "ml*", "perception*", "annotation*"]
 
 [tool.setuptools.package-data]
 dataset = ["README.md"]
 ml = ["README.md"]
+annotation = ["README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

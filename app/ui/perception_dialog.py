@@ -115,6 +115,18 @@ class PerceptionDialog(QDialog):
         fps_row.addWidget(self._fps)
         layout.addLayout(fps_row)
 
+        self._model_row = QHBoxLayout()
+        self._model_row.addWidget(QLabel("Weights file:"))
+        self._model = QLineEdit()
+        self._model.setPlaceholderText("yolov8n.pt (yolo only)")
+        self._model_row.addWidget(self._model, 1)
+        self._allow_download = QCheckBox("allow ultralytics to download missing weights")
+        self._model_row.addWidget(self._allow_download)
+        self._model_row_widget = QWidget()
+        self._model_row_widget.setLayout(self._model_row)
+        self._model_row_widget.setVisible(False)
+        layout.addWidget(self._model_row_widget)
+
         self._ack = QCheckBox("I understand — proceed (equivalent of --iknow)")
         self._ack.setVisible(False)
         self._ack.toggled.connect(self._update_run_enabled)
@@ -148,6 +160,7 @@ class PerceptionDialog(QDialog):
         provider = get(name)
         info = provider_info(provider)
         warnings = list(getattr(provider, "warnings", ()) or ())
+        self._model_row_widget.setVisible(name == "yolo")
         if not info.available:
             self._availability.setText(
                 f"Status: unavailable\n{info.install_hint or 'Install the optional dependencies.'}"
@@ -174,8 +187,17 @@ class PerceptionDialog(QDialog):
             QMessageBox.warning(self, "Perception", "Enter at least one prompt.")
             return
         provider = get(self._provider.currentData())
+        options: dict = {}
+        if getattr(provider, "name", "") == "yolo":
+            model = self._model.text().strip() or None
+            if model:
+                options["model"] = model
+            options["allow_download"] = self._allow_download.isChecked()
+        from perception.base import with_options
+
+        provider = with_options(provider, **options)
         self._run_btn.setEnabled(False)
-        for widget in (self._provider, self._prompts, self._fps, self._ack):
+        for widget in (self._provider, self._prompts, self._fps, self._ack, self._model, self._allow_download):
             widget.setEnabled(False)
         self._worker = _PerceptionWorker(self.recording, provider, prompts, self._fps.value(), self)
         self._worker.finished.connect(self._on_done)
@@ -183,7 +205,7 @@ class PerceptionDialog(QDialog):
         self.setWindowTitle("Perception — analyzing…")
 
     def _on_done(self, ok: bool, error: str, result) -> None:
-        for widget in (self._provider, self._prompts, self._fps, self._ack):
+        for widget in (self._provider, self._prompts, self._fps, self._ack, self._model, self._allow_download):
             widget.setEnabled(True)
         self._run_btn.setEnabled(True)
         self.setWindowTitle("Perception (optional)")

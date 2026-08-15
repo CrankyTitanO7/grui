@@ -5,12 +5,19 @@ region (click to seek); Cut/Copy/Paste/Delete/Trim act on the selection.
 Undo/redo and keyboard shortcuts are supported. Saving exports a new raw
 recording (original untouched); Build Dataset generates observation->action
 training samples from the loaded recording.
+
+Perception and annotations are optional tools layered on top: perception
+results can be shown as boxes on the frame, and the annotation editor lets
+the user inspect/accept/correct model proposals or draw their own boxes.
+Annotations are saved back to the derived ``annotations/`` layer — the raw
+recording, video and perception results are never modified.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -22,6 +29,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -31,10 +39,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from annotation.store import AnnotationStore, load_annotations
+from annotation.types import AnnotationStatus
+from app.ui.annotation_overlay import AnnotationOverlay
 from app.ui.keyboard_view import KeyboardView
 from app.ui.timeline_widget import TimelineWidget
 from editor.export import export_recording
 from editor.timeline import EditSession, remap_events
+from perception.types import BoundingBox
 from player.event_state import KeyStateTimeline
 from player.video_reader import VideoReader
 from recorder.config import RecorderConfig
@@ -88,6 +100,10 @@ class PlayerWindow(QMainWindow):
         self._perception_manifest = None
         self._zoom = 1.0  # relative to fit-to-window size
         self._current_frame: np.ndarray | None = None
+        self._current_frame_index = 0
+        self._annotations: AnnotationStore | None = None
+        self._selected_annotation_id: str | None = None
+        self._annotation_mode = False
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -256,10 +272,69 @@ class PlayerWindow(QMainWindow):
         overlay_row.addWidget(self._perception_status, 1)
         root.addLayout(overlay_row)
 
+        ann_row = QHBoxLayout()
+        self._show_annotations = QCheckBox("Show annotations")
+        self._show_annotations.toggled.connect(self._on_annotations_toggled)
+        self._edit_annotations_btn = QPushButton("✎ Edit Annotations")
+        self._edit_annotations_btn.setCheckable(True)
+        self._edit_annotations_btn.setToolTip(
+            "Toggle annotation editing: click boxes to select, drag to move, "
+            "drag handles to resize, drag empty space to draw a new box"
+        )
+        self._edit_annotations_btn.toggled.connect(self._on_annotation_mode_toggled)
+        self._import_annotations_btn = QPushButton("← Import Perception")
+        self._import_annotations_btn.setToolTip(
+            "Turn the current perception detections into (unreviewed) annotations"
+        )
+        self._import_annotations_btn.clicked.connect(self._on_import_annotations)
+        self._annotation_status = QLabel("")
+        self._annotation_status.setStyleSheet("color: #888888;")
+        ann_row.addWidget(self._show_annotations)
+        ann_row.addWidget(self._edit_annotations_btn)
+        ann_row.addWidget(self._import_annotations_btn)
+        ann_row.addWidget(self._annotation_status, 1)
+        root.addLayout(ann_row)
+
+        edit_ann_row = QHBoxLayout()
+        self._ann_label_edit = QLineEdit()
+        self._ann_label_edit.setPlaceholderText("Selected annotation label…")
+        self._ann_label_edit.setMaximumWidth(220)
+        self._apply_label_btn = QPushButton("Rename")
+        self._apply_label_btn.clicked.connect(self._on_rename_annotation)
+        self._verify_btn = QPushButton("✓ Verify")
+        self._verify_btn.clicked.connect(self._on_verify_annotation)
+        self._delete_ann_btn = QPushButton("✕ Delete")
+        self._delete_ann_btn.clicked.connect(self._on_delete_annotation)
+        self._undo_ann_btn = QPushButton("↶")
+        self._undo_ann_btn.setToolTip("Undo annotation change")
+        self._undo_ann_btn.clicked.connect(self._on_annotation_undo)
+        self._redo_ann_btn = QPushButton("↷")
+        self._redo_ann_btn.setToolTip("Redo annotation change")
+        self._redo_ann_btn.clicked.connect(self._on_annotation_redo)
+        self._save_annotations_btn = QPushButton("Save Annotations")
+        self._save_annotations_btn.clicked.connect(self._on_save_annotations)
+        edit_ann_row.addWidget(self._ann_label_edit)
+        edit_ann_row.addWidget(self._apply_label_btn)
+        edit_ann_row.addWidget(self._verify_btn)
+        edit_ann_row.addWidget(self._delete_ann_btn)
+        edit_ann_row.addWidget(self._undo_ann_btn)
+        edit_ann_row.addWidget(self._redo_ann_btn)
+        edit_ann_row.addWidget(self._save_annotations_btn)
+        edit_ann_row.addStretch(1)
+        root.addLayout(edit_ann_row)
+
         self.setCentralWidget(central)
         for button in central.findChildren(QPushButton):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.statusBar().showMessage("")
+
+        self._annotation_overlay = AnnotationOverlay(self._video_label)
+        self._annotation_overlay.setGeometry(self._video_label.rect())
+        self._annotation_overlay.annotationSelected.connect(self._on_annotation_selected)
+        self._annotation_overlay.annotationMoved.connect(self._on_annotation_moved)
+        self._annotation_overlay.annotationResized.connect(self._on_annotation_resized)
+        self._annotation_overlay.annotationCreated.connect(self._on_annotation_created)
+        self._annotation_overlay.raise_()
 
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (
@@ -270,6 +345,7 @@ class PlayerWindow(QMainWindow):
             self._cut_btn, self._copy_btn, self._paste_btn, self._delete_btn,
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
             self._dataset_btn, self._perception_btn,
+            self._show_annotations, self._edit_annotations_btn,
         ):
             widget.setEnabled(enabled)
 
@@ -337,6 +413,11 @@ class PlayerWindow(QMainWindow):
         self._at_end = False
         self._playing = False
         self._play_btn.setText("▶ Play")
+        self._annotations = load_annotations(recording.directory)
+        self._selected_annotation_id = None
+        self._annotation_mode = False
+        self._edit_annotations_btn.setChecked(False)
+        self._update_annotation_status_text()
 
         ranges = recording.metadata.get("edit_clips")
         self._session = EditSession(recording.duration, recording.frame_times, initial_ranges=ranges)
@@ -354,6 +435,7 @@ class PlayerWindow(QMainWindow):
         self._timer.start()
         self._set_enabled(True)
         self._load_perception(recording)
+        self._refresh_annotation_view()
         self.setWindowTitle(f"Recording Player — {recording.directory.name}")
         self._seek_to(0.0)
         self._status(f"Loaded {recording.directory.name}")
@@ -368,6 +450,14 @@ class PlayerWindow(QMainWindow):
         self._current_frame = None
         self._show_perception.setChecked(False)
         self._next_perception_btn.setEnabled(False)
+        self._annotations = None
+        self._selected_annotation_id = None
+        self._annotation_mode = False
+        self._edit_annotations_btn.setChecked(False)
+        self._show_annotations.setChecked(False)
+        self._annotation_overlay.set_editing(False)
+        self._annotation_overlay.set_annotations([])
+        self._annotation_overlay.select_annotation(None)
 
     # --------------------------------------------------------- perception
 
@@ -432,10 +522,12 @@ class PlayerWindow(QMainWindow):
             return
         t = self._recording.frame_time(frame_index)
         self._current_t = t
+        self._current_frame_index = frame_index
         if self._show_perception.isChecked():
             frame = self._draw_perception_overlay(frame_index, frame)
         self._current_frame = frame
         self._render_frame()
+        self._update_annotation_overlay()
         self._update_state_views(t)
         self._timeline.set_playhead(t)
         self._update_time_label()
@@ -455,6 +547,10 @@ class PlayerWindow(QMainWindow):
         pixmap = _frame_to_pixmap(self._current_frame, self._render_size())
         self._video_label.setPixmap(pixmap)
         self._video_label.setMinimumSize(pixmap.size())
+        overlay = getattr(self, "_annotation_overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self._video_label.rect())
+            overlay.raise_()
 
     def _update_state_views(self, t: float) -> None:
         if self._keys is not None:
@@ -625,6 +721,7 @@ class PlayerWindow(QMainWindow):
             [(m["t"], str(m.get("label", ""))) for m in self._recording.markers if "t" in m],
         )
         self._timeline.set_events(self._timeline_events())
+        self._timeline.set_annotation_ticks(self._annotation_ticks())
         self._update_time_label()
 
     def _warn_no_selection(self) -> None:
@@ -743,6 +840,185 @@ class PlayerWindow(QMainWindow):
     def _on_perception_done(self, _result: int) -> None:
         if self._recording is not None:
             self._load_perception(self._recording)
+            self._refresh_annotation_view()
+
+    # --------------------------------------------------------- annotations
+
+    def _on_annotations_toggled(self, _checked: bool) -> None:
+        self._update_annotation_overlay()
+
+    def _on_annotation_mode_toggled(self, checked: bool) -> None:
+        self._annotation_mode = checked
+        self._update_annotation_overlay()
+
+    def _on_import_annotations(self) -> None:
+        if self._recording is None or self._annotations is None:
+            return
+        if not self._perception_manifest:
+            self._status("No perception results to import — run perception first")
+            return
+        from perception.runner import CachedAnalysis
+
+        cached = CachedAnalysis(self._recording.directory / "perception")
+        imported = self._annotations.import_perception(cached.read_results())
+        self._save_annotations_state()
+        if imported:
+            self._status(f"Imported {imported} perception detections as annotations")
+        else:
+            self._status("No new annotations (all detections already imported)")
+
+    def _on_annotation_selected(self, annotation_id: str) -> None:
+        self._selected_annotation_id = annotation_id
+        annotation = self._annotations.get(annotation_id) if self._annotations else None
+        if annotation is not None:
+            self._ann_label_edit.setText(annotation.label)
+            self._ann_label_edit.setEnabled(True)
+            self._apply_label_btn.setEnabled(True)
+            self._verify_btn.setEnabled(True)
+            self._delete_ann_btn.setEnabled(True)
+        self._update_annotation_status_text()
+
+    def _on_annotation_moved(self, annotation_id: str, dx: float, dy: float) -> None:
+        if self._annotations is None:
+            return
+        if self._annotations.move(annotation_id, dx, dy):
+            self._save_annotations_state()
+
+    def _on_annotation_resized(self, annotation_id: str, x1: float, y1: float, x2: float, y2: float) -> None:
+        if self._annotations is None:
+            return
+        if self._annotations.resize(annotation_id, BoundingBox(x1, y1, x2, y2)):
+            self._save_annotations_state()
+
+    def _on_annotation_created(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        if self._recording is None or self._annotations is None:
+            return
+        frame_index = self._recording.nearest_frame_index(self._current_t)
+        annotation = self._annotations.create(
+            label="", bbox=BoundingBox(x1, y1, x2, y2),
+            frame_index=frame_index, t=self._recording.frame_time(frame_index),
+        )
+        self._save_annotations_state()
+        self._selected_annotation_id = annotation.id
+        self._ann_label_edit.setEnabled(True)
+        self._ann_label_edit.setText("")
+        self._ann_label_edit.setFocus()
+        self._annotation_overlay.select_annotation(annotation.id)
+        self._update_annotation_status_text()
+        self._status("New annotation created — type a label and press Rename")
+
+    def _on_rename_annotation(self) -> None:
+        if self._annotations is None or self._selected_annotation_id is None:
+            return
+        label = self._ann_label_edit.text().strip()
+        if not label:
+            self._status("Enter a label first")
+            return
+        if self._annotations.rename(self._selected_annotation_id, label):
+            self._save_annotations_state()
+            self._status(f"Renamed annotation to {label!r}")
+
+    def _on_verify_annotation(self) -> None:
+        if self._annotations is None or self._selected_annotation_id is None:
+            return
+        annotation = self._annotations.get(self._selected_annotation_id)
+        if annotation is None:
+            return
+        if annotation.status == AnnotationStatus.VERIFIED:
+            self._annotations.set_status(self._selected_annotation_id, AnnotationStatus.REVIEWED)
+            self._status("Un-verified annotation")
+        else:
+            self._annotations.verify(self._selected_annotation_id)
+            self._status("Verified annotation")
+        self._save_annotations_state()
+
+    def _on_delete_annotation(self) -> None:
+        if self._annotations is None or self._selected_annotation_id is None:
+            return
+        if self._annotations.delete(self._selected_annotation_id):
+            self._selected_annotation_id = None
+            self._ann_label_edit.clear()
+            self._save_annotations_state()
+            self._status("Deleted annotation")
+
+    def _on_annotation_undo(self) -> None:
+        if self._annotations is not None and self._annotations.undo():
+            self._save_annotations_state()
+
+    def _on_annotation_redo(self) -> None:
+        if self._annotations is not None and self._annotations.redo():
+            self._save_annotations_state()
+
+    def _on_save_annotations(self) -> None:
+        if self._annotations is None:
+            return
+        self._annotations.save()
+        self._status(f"Saved {len(self._annotations)} annotations")
+
+    def _save_annotations_state(self) -> None:
+        if self._annotations is None:
+            return
+        self._annotations.save()
+        self._refresh_annotation_view()
+
+    def _refresh_annotation_view(self) -> None:
+        self._update_annotation_overlay()
+        self._refresh_timeline_view()
+        self._update_annotation_status_text()
+
+    def _update_annotation_overlay(self) -> None:
+        if self._recording is None or self._annotations is None:
+            return
+        show = self._show_annotations.isChecked()
+        self._annotation_overlay.set_editing(show and self._annotation_mode)
+        if not show:
+            self._annotation_overlay.set_annotations([])
+            return
+        frame_index = self._recording.nearest_frame_index(self._current_t)
+        boxes = [
+            (a.id, a.label or "(untitled)", a.status.value, (a.bbox.x1, a.bbox.y1, a.bbox.x2, a.bbox.y2))
+            for a in self._annotations.for_frame(frame_index)
+        ]
+        if self._selected_annotation_id not in {b[0] for b in boxes}:
+            self._annotation_overlay.select_annotation(None)
+        self._annotation_overlay.set_annotations(boxes)
+        self._annotation_overlay.raise_()
+
+    def _update_annotation_status_text(self) -> None:
+        annotations = self._annotations
+        if annotations is None:
+            self._annotation_status.setText("No annotations file")
+            self._edit_annotations_btn.setEnabled(False)
+            self._import_annotations_btn.setEnabled(False)
+            self._undo_ann_btn.setEnabled(False)
+            self._redo_ann_btn.setEnabled(False)
+            self._save_annotations_btn.setEnabled(False)
+            return
+        total = len(annotations)
+        verified = annotations.verified_count
+        self._annotation_status.setText(
+            f"{total} annotations ({verified} verified, {total - verified} pending)"
+        )
+        self._save_annotations_btn.setEnabled(True)
+        self._undo_ann_btn.setEnabled(annotations.can_undo)
+        self._redo_ann_btn.setEnabled(annotations.can_redo)
+
+    def _annotation_ticks(self) -> list[tuple[float, str, str]]:
+        """Timeline ticks: human annotations (kind human) + perception (prediction),
+        mapped through the edited timeline so deleted regions drop out."""
+        if self._recording is None or self._session is None:
+            return []
+        raw: list[dict[str, Any]] = []
+        if self._annotations is not None:
+            for a in self._annotations:
+                raw.append({"t": a.t, "kind": "human", "label": a.label})
+        for frame_index in sorted(self._perception):
+            t = self._recording.frame_time(frame_index)
+            raw.append({"t": t, "kind": "prediction", "label": "perception"})
+        ticks = []
+        for item in remap_events(raw, self._session.timeline):
+            ticks.append((float(item["t"]), str(item["kind"]), str(item.get("label") or "")))
+        return sorted(ticks)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._teardown_reader()

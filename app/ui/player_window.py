@@ -104,6 +104,7 @@ class PlayerWindow(QMainWindow):
         self._selected_annotation_id: str | None = None
         self._annotation_mode = False
         self._events: list[Event] = []
+        self._review_queue = None
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -361,6 +362,21 @@ class PlayerWindow(QMainWindow):
         events_row.addWidget(self._events_status, 1)
         root.addLayout(events_row)
 
+        review_row = QHBoxLayout()
+        self._review_btn = QPushButton("Review…")
+        self._review_btn.setToolTip(
+            "Open the review queue: frames flagged by review strategies "
+            "(low-confidence detections, rare actions, visual novelty, "
+            "unreviewed predictions) for a human look. Voting updates the "
+            "review/queue.jsonl and annotation layers — raw data untouched"
+        )
+        self._review_btn.clicked.connect(self._on_review)
+        self._review_status = QLabel("")
+        self._review_status.setStyleSheet("color: #888888;")
+        review_row.addWidget(self._review_btn)
+        review_row.addWidget(self._review_status, 1)
+        root.addLayout(review_row)
+
         self.setCentralWidget(central)
         for button in central.findChildren(QPushButton):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -385,6 +401,7 @@ class PlayerWindow(QMainWindow):
             self._dataset_btn, self._perception_btn,
             self._show_annotations, self._edit_annotations_btn,
             self._events_combo, self._events_label, self._add_event_btn,
+            self._review_btn,
         ):
             widget.setEnabled(enabled)
 
@@ -476,6 +493,7 @@ class PlayerWindow(QMainWindow):
         self._load_perception(recording)
         self._refresh_annotation_view()
         self._load_events()
+        self._load_review_queue(recording)
         self.setWindowTitle(f"Recording Player — {recording.directory.name}")
         self._seek_to(0.0)
         self._status(f"Loaded {recording.directory.name}")
@@ -504,6 +522,8 @@ class PlayerWindow(QMainWindow):
         self._annotation_overlay.set_annotations([])
         self._annotation_overlay.select_annotation(None)
         self._annotation_overlay.hide()
+        self._review_queue = None
+        self._review_status.setText("")
 
     # --------------------------------------------------------- perception
 
@@ -966,6 +986,63 @@ class PlayerWindow(QMainWindow):
             if clip.source_start <= t < clip.source_end:
                 return clip.edited_time(t)
         return t
+
+    # --------------------------------------------------------- review queue
+
+    def _load_review_queue(self, recording: RecordingData) -> None:
+        """Load the persisted review layer (candidates are built on demand)."""
+        from dataset.review import ReviewQueue
+
+        self._review_queue = ReviewQueue(recording)
+        self._update_review_status()
+
+    def _update_review_status(self) -> None:
+        if self._review_queue is None:
+            return
+        pending = len(self._review_queue.pending())
+        if pending:
+            self._review_status.setText(f"Review: {pending} pending candidate(s)")
+        else:
+            self._review_status.setText(
+                "Review: no pending candidates — open Review… to build the queue"
+            )
+
+    def _on_review(self) -> None:
+        """Open the review queue dialog (rebuilds candidates first)."""
+        if self._recording is None:
+            return
+        from app.ui.review_dialog import ReviewDialog
+        from dataset.review import ReviewQueue
+
+        self._review_queue = ReviewQueue(self._recording)
+        self._review_queue.refresh()
+        self._update_review_status()
+        dialog = ReviewDialog(self._review_queue, on_jump=self._review_jump_to, parent=self)
+        dialog.finished.connect(self._on_review_done)
+        dialog.exec()
+
+    def _on_review_done(self, _result: int) -> None:
+        """Verdicts may have verified/rejected annotations — reload them."""
+        if self._recording is not None:
+            self._annotations = load_annotations(self._recording.directory)
+            self._refresh_annotation_view()
+            self._update_review_status()
+
+    def _review_jump_to(self, frame_index: int) -> None:
+        """Seek the player to a review-candidate frame (raw frame index)."""
+        if self._recording is None or self._reader is None:
+            return
+        self._playing = False
+        self._at_end = False
+        self._reader.set_playing(False)
+        self._play_btn.setText("▶ Play")
+        t = self._recording.frame_time(frame_index)
+        self._seek_to_index(frame_index)
+        self._current_t = t
+        self._update_state_views(t)
+        self._timeline.set_playhead(self._raw_to_edited(t))
+        self._update_time_label()
+        self._status(f"Review: frame {frame_index} at {_format_time(t)}")
 
     # --------------------------------------------------------- annotations
 

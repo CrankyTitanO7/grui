@@ -76,7 +76,10 @@ def test_reader_does_not_flood_queue(tmp_path):
 
 
 def _write_perception(recording, by_frame):
-    """Write fake cached perception results: frame_index -> [labels]."""
+    """Write fake cached perception results.
+
+    by_frame: frame_index -> [labels] or [(label, confidence)] entries.
+    """
     import json
 
     out = recording.directory / "perception"
@@ -88,15 +91,18 @@ def _write_perception(recording, by_frame):
         encoding="utf-8",
     )
     with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
-        for frame_index, labels in by_frame.items():
+        for frame_index, entries in by_frame.items():
+            def detection(entry):
+                if isinstance(entry, tuple):
+                    label, conf = entry
+                    return {"label": label, "bbox": {"x1": 1.0, "y1": 1.0, "x2": 5.0, "y2": 5.0}, "confidence": conf}
+                return {"label": entry, "bbox": {"x1": 1.0, "y1": 1.0, "x2": 5.0, "y2": 5.0}}
+
             row = {
                 "frame_index": frame_index,
                 "t": float(recording.frame_time(frame_index)),
                 "prompt": "test",
-                "detections": [
-                    {"label": label, "bbox": {"x1": 1.0, "y1": 1.0, "x2": 5.0, "y2": 5.0}}
-                    for label in labels
-                ],
+                "detections": [detection(entry) for entry in entries],
             }
             fh.write(json.dumps(row) + "\n")
 
@@ -656,4 +662,189 @@ def test_dataset_dialog_builds_dataset(window, tmp_path, monkeypatch):
     assert (out / "samples.jsonl").exists()
     assert len(list((out / "frames").glob("frame_*.png"))) > 0
     assert dialog.result() == QDialog.DialogCode.Accepted  # accepted after success
+
+
+# ------------------------------------------------------------- review queue
+
+def test_review_btn_disabled_without_recording(tmp_path):
+    win = PlayerWindow(recordings_root=str(tmp_path / "root"))
+    assert not win._review_btn.isEnabled()
+    win.close()
+
+
+def test_review_dialog_lists_uncertainty_candidates(window):
+    """Uncertainty candidates only: the low-confidence frame, not the solid one."""
+    from app.ui.review_dialog import ReviewDialog
+    from dataset.review import ReviewQueue
+
+    _write_perception(window._recording, {
+        5: [("one", 0.42)],
+        15: [("two", 0.95)],
+    })
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    assert len(queue.pending()) == 1
+    dialog = ReviewDialog(queue)
+    assert dialog._list.count() == 1
+    text = dialog._list.item(0).text()
+    assert "frame      5" in text
+    assert "low confidence 0.42" in text
+    assert "priority=58" in text
+    assert "15" not in text
+    dialog.close()
+
+
+def test_review_accept_verifies_frame_annotations(window):
+    """Accepting a frame propagates: its model annotations become VERIFIED."""
+    from app.ui.review_dialog import ReviewDialog
+    from annotation.store import load_annotations
+    from annotation.types import AnnotationStatus
+    from dataset.review import ReviewQueue
+    from perception.types import BoundingBox
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    window._annotations.create(
+        label="one",
+        bbox=BoundingBox(0.1, 0.1, 0.5, 0.5),
+        frame_index=5,
+        t=window._recording.frame_time(5),
+        source="model",
+        status=AnnotationStatus.PREDICTED,
+    )
+    window._annotations.save()
+
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty", "annotation_uncertainty"])
+    assert {item.frame_index for item in queue.pending()} == {5}
+    dialog = ReviewDialog(queue)
+    dialog._list.setCurrentRow(0)
+    assert dialog._selected_item().frame_index == 5
+    dialog._decide("accept")
+
+    assert queue.verdicts.get("5") == "accepted"
+    assert dialog._list.count() == 0  # moved out of pending
+    fresh = load_annotations(window._recording.directory)
+    assert [a for a in fresh if a.frame_index == 5][0].status == AnnotationStatus.VERIFIED
+    reloaded = ReviewQueue(window._recording)
+    assert reloaded.verdicts.get("5") == "accepted"  # persisted to queue.jsonl
+    dialog.close()
+
+
+def test_review_reject_marks_frame_annotations_rejected(window):
+    from app.ui.review_dialog import ReviewDialog
+    from annotation.store import load_annotations
+    from annotation.types import AnnotationStatus
+    from dataset.review import ReviewQueue
+    from perception.types import BoundingBox
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    window._annotations.create(
+        label="one",
+        bbox=BoundingBox(0.1, 0.1, 0.5, 0.5),
+        frame_index=5,
+        t=window._recording.frame_time(5),
+        source="model",
+        status=AnnotationStatus.PREDICTED,
+    )
+    window._annotations.save()
+
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    dialog = ReviewDialog(queue)
+    dialog._list.setCurrentRow(0)
+    dialog._decide("reject")
+
+    assert queue.verdicts.get("5") == "rejected"
+    fresh = load_annotations(window._recording.directory)
+    assert [a for a in fresh if a.frame_index == 5][0].status == AnnotationStatus.REJECTED
+    dialog.close()
+
+
+def test_review_skip_leaves_annotations_untouched(window):
+    from app.ui.review_dialog import ReviewDialog
+    from annotation.store import load_annotations
+    from annotation.types import AnnotationStatus
+    from dataset.review import ReviewQueue
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    dialog = ReviewDialog(queue)
+    dialog._list.setCurrentRow(0)
+    dialog._decide("skip")
+
+    assert queue.verdicts.get("5") == "skipped"
+    assert load_annotations(window._recording.directory).verified_count == 0
+    dialog.close()
+
+
+def test_review_show_decided_restores_decided_items(window):
+    from app.ui.review_dialog import ReviewDialog
+    from dataset.review import ReviewQueue
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    dialog = ReviewDialog(queue)
+    dialog._list.setCurrentRow(0)
+    dialog._decide("accept")
+    assert dialog._list.count() == 0
+
+    dialog._show_decided.setChecked(True)
+    QApplication.processEvents()
+    assert dialog._list.count() == 1
+    assert "→ accepted" in dialog._list.item(0).text()
+    dialog.close()
+
+
+def test_review_dialog_jump_closes_loop(window):
+    from app.ui.review_dialog import ReviewDialog
+    from dataset.review import ReviewQueue
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    jumped = []
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    dialog = ReviewDialog(queue, on_jump=jumped.append)
+    dialog._list.setCurrentRow(0)
+    assert dialog._jump_btn.isEnabled()
+    dialog._on_jump()
+    assert jumped == [5]
+    dialog.close()
+
+
+def test_review_jump_to_seeks_player_frame(window):
+    window._review_jump_to(12)
+    assert window._current_t == pytest.approx(window._recording.frame_time(12))
+    assert abs(window._timeline._playhead - window._recording.frame_time(12)) < 0.11
+    assert not window._playing
+
+
+def test_review_button_opens_dialog_and_saves_queue(window, monkeypatch):
+    from PySide6.QtCore import QObject, Signal
+    from dataset.review import ReviewQueue
+
+    opened = []
+
+    class _FakeDialog(QObject):
+        finished = Signal(int)
+
+        def __init__(self, queue, on_jump=None, parent=None):
+            super().__init__()
+            self.queue = queue
+            self.on_jump = on_jump
+            opened.append(self)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr("app.ui.review_dialog.ReviewDialog", _FakeDialog)
+    window._review_btn.click()
+
+    assert len(opened) == 1
+    assert isinstance(window._review_queue, ReviewQueue)
+    assert window._review_queue.path.exists()  # refresh() persisted the queue
+    assert window._review_status.text().startswith("Review:")
+    assert opened[0].on_jump.__self__ is window
+    assert opened[0].on_jump.__func__ is PlayerWindow._review_jump_to
 

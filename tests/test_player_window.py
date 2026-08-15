@@ -532,6 +532,71 @@ def test_events_row_empty_without_recording(tmp_path):
     win.close()
 
 
+# ----------------------------------------------------- manual events (GUI)
+
+class _FakeEventDialog:
+    kind = "watch"
+    label = "boss"
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+
+        return QDialog.DialogCode.Accepted
+
+
+def test_add_manual_event_from_selection(window, monkeypatch):
+    from perception.events import read_events
+
+    monkeypatch.setattr("app.ui.player_window.EventDialog", _FakeEventDialog)
+    window._on_selection_changed((0.3, 1.2))
+
+    window._on_add_event()
+
+    stored = read_events(window._recording.directory)
+    assert len(stored) == 1
+    event = stored[0]
+    assert event.kind == "watch"
+    assert event.label == "boss"
+    assert event.start_t == pytest.approx(window._recording.snap_to_frame(0.3))
+    assert event.end_t == pytest.approx(window._recording.snap_to_frame(1.2))
+    assert event.detail.get("manual") is True
+    assert window._events_combo.count() == 1
+    assert "watch" in window._events_combo.itemText(0)
+
+
+def test_add_manual_event_maps_through_cut(window, monkeypatch):
+    """Selection is in edited time; a cut shifts the mapped raw span."""
+    from perception.events import read_events
+
+    window._on_selection_changed((0.0, 0.5))
+    window._on_cut()  # raw [0, 0.5) removed; edited t now starts at raw 0.5
+
+    monkeypatch.setattr("app.ui.player_window.EventDialog", _FakeEventDialog)
+    window._on_selection_changed((0.1, 0.4))
+    window._on_add_event()
+
+    stored = read_events(window._recording.directory)
+    assert len(stored) == 1
+    assert stored[0].start_t > 0.5  # mapped back into surviving raw time
+    offset = window._session.timeline.clips[0].source_start
+    assert stored[0].start_t == pytest.approx(offset + 0.1, abs=0.02)
+    assert stored[0].end_t == pytest.approx(offset + 0.4, abs=0.02)
+
+
+def test_add_manual_event_requires_selection(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", staticmethod(lambda *args, **kwargs: warnings.append(args))
+    )
+    window._on_add_event()
+    assert warnings and warnings[0][1] == "No Selection"
+
+
 def test_save_creates_new_recording(window, tmp_path, monkeypatch):
     before = set(list_recordings(tmp_path / "root"))
     monkeypatch.setattr(

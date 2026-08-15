@@ -26,6 +26,7 @@ from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -47,11 +48,12 @@ from annotation.store import (
 )
 from annotation.types import AnnotationStatus
 from app.ui.annotation_overlay import AnnotationOverlay
+from app.ui.event_dialog import EventDialog
 from app.ui.keyboard_view import KeyboardView
 from app.ui.timeline_widget import TimelineWidget
 from editor.export import export_recording
 from editor.timeline import EditSession, remap_events
-from perception.events import Event, read_events
+from perception.events import Event, read_events, write_events
 from perception.types import BoundingBox
 from player.event_state import KeyStateTimeline
 from player.video_reader import VideoReader
@@ -345,10 +347,17 @@ class PlayerWindow(QMainWindow):
         )
         self._events_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._events_combo.currentIndexChanged.connect(self._on_event_selected)
+        self._add_event_btn = QPushButton("＋ Add Event")
+        self._add_event_btn.setToolTip(
+            "Create a manual event from the timeline selection — drag to select "
+            "a region first (Stored under perception/events.jsonl, raw data untouched)"
+        )
+        self._add_event_btn.clicked.connect(self._on_add_event)
         self._events_status = QLabel("")
         self._events_status.setStyleSheet("color: #888888;")
         events_row.addWidget(self._events_label)
         events_row.addWidget(self._events_combo)
+        events_row.addWidget(self._add_event_btn)
         events_row.addWidget(self._events_status, 1)
         root.addLayout(events_row)
 
@@ -375,7 +384,7 @@ class PlayerWindow(QMainWindow):
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
             self._dataset_btn, self._perception_btn,
             self._show_annotations, self._edit_annotations_btn,
-            self._events_combo, self._events_label,
+            self._events_combo, self._events_label, self._add_event_btn,
         ):
             widget.setEnabled(enabled)
 
@@ -899,6 +908,56 @@ class PlayerWindow(QMainWindow):
         self._update_time_label()
         self._status(f"Event: {event.kind} {event.label} at {event.start_t:.2f}s")
 
+    def _on_add_event(self) -> None:
+        """Turn the timeline selection into a manual event (derived data only)."""
+        if self._recording is None:
+            return
+        selection = self._selection()
+        if not selection:
+            self._warn_no_selection()
+            return
+        edited_start, edited_end = selection
+        raw_start = self._edited_to_raw(edited_start)
+        raw_end = self._edited_to_raw(edited_end - 1e-9)
+        if raw_start is None or raw_end is None or raw_end <= raw_start:
+            QMessageBox.warning(
+                self, "Add Event",
+                "The selection lies entirely inside a removed region.",
+            )
+            return
+        dialog = EventDialog((edited_start, edited_end), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        recording = load_recording(self._recording.directory)
+        raw_start = recording.snap_to_frame(raw_start)
+        raw_end = recording.snap_to_frame(raw_end)
+        event = Event(
+            kind=dialog.kind,
+            label=dialog.label or dialog.kind,
+            start_t=raw_start,
+            end_t=raw_end,
+            start_frame=recording.nearest_frame_index(raw_start),
+            end_frame=recording.nearest_frame_index(raw_end),
+            detail={"manual": True},
+        )
+        self._events = [e for e in read_events(self._recording.directory) if not (
+            e.kind == event.kind and e.detail.get("manual") and (
+                abs(e.start_t - event.start_t) < 0.01 and abs(e.end_t - event.end_t) < 0.01
+            )
+        )] + [event]
+        write_events(self._recording.directory, self._events)
+        self._load_events()
+        self._status(f"Added {dialog.kind} event at {edited_start:.2f}s-{edited_end:.2f}s")
+
+    def _edited_to_raw(self, t: float) -> float | None:
+        """Map an edited-timeline time to raw source time (None if removed)."""
+        if self._session is None:
+            return t
+        for clip in self._session.timeline.clips:
+            if clip.start <= t < clip.start + clip.length:
+                return clip.source_time(t)
+        return None
+
     def _raw_to_edited(self, t: float) -> float:
         """Map a raw recording time to the edited timeline (identity when unedited)."""
         if self._session is None:
@@ -920,11 +979,9 @@ class PlayerWindow(QMainWindow):
         """Annotation/tick clicked on the timeline: jump to its frame, select if human."""
         if self._recording is None or self._session is None:
             return
-        raw_t = t
-        for clip in self._session.timeline.clips:
-            if clip.start <= t < clip.start + clip.length:
-                raw_t = clip.source_time(t)
-                break
+        raw_t = self._edited_to_raw(t) if t < self._session.timeline.duration else None
+        if raw_t is None:
+            raw_t = t
         self._seek_to(raw_t)
         self._current_t = raw_t
         self._update_state_views(raw_t)

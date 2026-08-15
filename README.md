@@ -179,7 +179,10 @@ grui perception events <recording> --json       # machine-readable output
 The player loads these events automatically: **⚡ Events** lists them
 (select one to jump to its start frame), and they appear on the timeline as
 orange squares in the annotation lane when **Show annotations** is
-checked.
+checked. Events can also be created by hand: drag a region on the timeline,
+click **＋ Add Event**, and give the event a kind + label — the selection
+is mapped back to raw recording time and stored in `events.jsonl`
+(marked `"manual": true`), never in the raw recording.
 
 ## Player & editor
 

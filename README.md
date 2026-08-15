@@ -146,7 +146,9 @@ VRAM. GRUI never bundles or silently downloads model weights; check the
 model's license before commercial use.
 
 The built-in player has an optional overlay: **Perception…** runs an
-analysis, and **Show perception detections** draws the boxes on the video.
+analysis, and **Show perception detections** draws every model box on the
+video — dashed boxes are not yet imported (click one to import it as a
+draft annotation), solid boxes are already imported (click to select them).
 Perception is an extension — GRUI's core remains general-purpose human
 demonstration recording and imitation-learning dataset generation.
 
@@ -156,7 +158,8 @@ Click **Open Player** in the main window to browse saved recordings:
 
 1. Pick a recording from the list (or **Browse…**). Video plays with a
    live keyboard/mouse state view that stays in exact sync via
-   `frames.jsonl`. Keyboard events are drawn on the timeline as yellow
+   `frames.jsonl` (**Show input state** hides the keyboard monitor and
+   mouse graph). Keyboard events are drawn on the timeline as yellow
    dots (they follow cuts/pastes/undo).
 2. **Drag on the timeline** to select a region (click to seek — the
    selection is drawn with clear edge borders and shows its duration;
@@ -169,6 +172,24 @@ Click **Open Player** in the main window to browse saved recordings:
 4. **Save Edits as New Recording…** exports a brand-new recording (video
    re-encoded from kept frames, events/markers/frames remapped and
    duplicated through pasted clips) — the source recording is untouched.
+5. **Annotations** (optional, two exclusive views that uncheck each
+   other; stored per recording in `annotations/` — raw files and
+   perception results are never modified):
+   - **Show perception detections**: every model box on the video.
+     Dashed = not imported yet — clicking the box imports just that one
+     as a draft annotation. Solid = already imported — clicking selects
+     the annotation. **← Import Perception** converts detections into
+     draft annotations (asks *this frame only — recommended* vs *all
+     detections*); model predictions are guesses, so each box stays
+     individually editable and the original model output is preserved on
+     the annotation's `prediction` field.
+   - **Show annotations**: the human annotation layer. **✎ Edit
+     Annotations** enables editing — click a box to select it, drag to
+     move, drag corners to resize, drag empty space to draw a new box,
+     then type a label and press **Rename**, or use **✓ Verify /
+     ✕ Delete / ↶↷** and **Save Annotations**. Unique boxes are keyed
+     per detection (frame, label, box, provider), so same-named objects
+     can be corrected individually.
 
 Edits are stored in the exported `metadata.json` under `edit_clips` (and
 `edit_history`), so reopening the exported recording restores the same
@@ -257,8 +278,10 @@ wall-clock guesses.
 
 Perception analysis (see [Optional Perception](#optional-perception)) writes
 an extra `perception/` directory (`manifest.json` + `results.jsonl`) next to
-the raw files. It is optional, derived and never required to read or edit a
-recording.
+the raw files, and the player's annotation editor writes an `annotations/`
+layer (`manifest.json` + `annotations.jsonl`) with every human
+correction/verification. Both are optional, derived and never required to
+read or edit a recording.
 
 ## Architecture
 

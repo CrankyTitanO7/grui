@@ -170,6 +170,46 @@ model (~6 GB, `huggingface-cli login`) needing a CUDA GPU with several GB of
 VRAM. GRUI never bundles or silently downloads model weights; check the
 model's license before commercial use.
 
+### yolo (fixed-vocabulary detection)
+
+YOLO is a second optional provider: fast, offline object detection against
+the fixed class vocabulary baked into the weights (typically the COCO 80
+classes, e.g. `person`, `car`, `bird`). Unlike LocateAnything there is no
+natural-language prompting — prompts are matched against class names — but
+a YOLO pass over a real recording is seconds, not hours.
+
+Install the optional dependency stack:
+
+```bash
+uv pip install -e ".[yolo]"         # uv is recommended
+# or: pip install -e ".[yolo]"
+```
+
+GRUI **never downloads YOLO weights.** Get a `.pt` file yourself — for
+example `yolov8n.pt` from the
+[ultralytics assets releases](https://github.com/ultralytics/assets/releases)
+— and point the analysis at it:
+
+```bash
+grui perception analyze <recording> --provider yolo \
+    --model yolov8n.pt --prompt "person" --prompt "car" --fps 2
+
+grui perception analyze <recording> --provider yolo --model yolov8n.pt \
+    --prompt "person" --conf 0.40             # raise the confidence floor
+```
+
+`--model` defaults to `yolov8n.pt` (searched in the current directory and
+the common weights dirs), `--conf` sets the detection threshold (default
+0.25) and `--allow-download` explicitly opts into ultralytics' own
+auto-download behavior. Unrecognized prompts produce no detections — the
+class vocabulary is whatever your `.pt` knows.
+
+**Licensing**: YOLO weights come from Ultralytics (AGPL-3.0 for the
+official releases; check the license of the specific `.pt` you use before
+commercial use). Everything YOLO-specific lives in
+`perception/providers/yolo.py` behind the same generic provider interface,
+so nothing else in GRUI touches ultralytics.
+
 The built-in player has an optional overlay: **Perception…** runs an
 analysis, and **Show perception detections** draws every model box on the
 video — dashed boxes are not yet imported (click one to import it as a

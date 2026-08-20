@@ -48,9 +48,11 @@ from annotation.store import (
 )
 from annotation.types import AnnotationStatus
 from app.ui.annotation_overlay import AnnotationOverlay
+from app.ui.episode_suggest_dialog import EpisodeSuggestDialog
 from app.ui.event_dialog import EventDialog
 from app.ui.keyboard_view import KeyboardView
 from app.ui.timeline_widget import TimelineWidget
+from dataset.episodes import Episode, merge_episodes, read_episodes, write_episodes
 from editor.export import export_recording
 from editor.timeline import EditSession, remap_events
 from perception.events import Event, read_events, write_events
@@ -104,6 +106,7 @@ class PlayerWindow(QMainWindow):
         self._selected_annotation_id: str | None = None
         self._annotation_mode = False
         self._events: list[Event] = []
+        self._episodes: list[Episode] = []
         self._review_queue = None
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
@@ -381,6 +384,42 @@ class PlayerWindow(QMainWindow):
         events_row.addWidget(self._events_status, 1)
         root.addLayout(events_row)
 
+        episodes_row = QHBoxLayout()
+        self._episodes_label = QLabel("✂ Episodes:")
+        self._episodes_combo = QComboBox()
+        self._episodes_combo.setToolTip(
+            "Episode segmentation (episodes.jsonl) — select one to jump to its start"
+        )
+        self._episodes_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._episodes_combo.currentIndexChanged.connect(self._on_episode_selected)
+        self._add_episode_btn = QPushButton("＋ New Episode")
+        self._add_episode_btn.setToolTip(
+            "Create a manual episode from the timeline selection — drag to select "
+            "a region first (Stored under episodes.jsonl, raw data untouched)"
+        )
+        self._add_episode_btn.clicked.connect(self._on_add_episode)
+        self._delete_episode_btn = QPushButton("✕ Delete")
+        self._delete_episode_btn.setToolTip(
+            "Remove the selected episode from episodes.jsonl "
+            "(derived metadata only, raw data untouched)"
+        )
+        self._delete_episode_btn.clicked.connect(self._on_delete_episode)
+        self._suggest_episodes_btn = QPushButton("Suggest…")
+        self._suggest_episodes_btn.setToolTip(
+            "Automatically split the recording into episodes from inactivity, "
+            "markers, visual scene changes, perception events and input jumps"
+        )
+        self._suggest_episodes_btn.clicked.connect(self._on_suggest_episodes)
+        self._episodes_status = QLabel("")
+        self._episodes_status.setStyleSheet("color: #888888;")
+        episodes_row.addWidget(self._episodes_label)
+        episodes_row.addWidget(self._episodes_combo)
+        episodes_row.addWidget(self._add_episode_btn)
+        episodes_row.addWidget(self._delete_episode_btn)
+        episodes_row.addWidget(self._suggest_episodes_btn)
+        episodes_row.addWidget(self._episodes_status, 1)
+        root.addLayout(episodes_row)
+
         review_row = QHBoxLayout()
         self._review_btn = QPushButton("Review…")
         self._review_btn.setToolTip(
@@ -422,6 +461,8 @@ class PlayerWindow(QMainWindow):
             self._prev_ann_btn, self._next_ann_btn,
             self._events_combo, self._events_label, self._add_event_btn,
             self._delete_event_btn,
+            self._episodes_combo, self._episodes_label, self._add_episode_btn,
+            self._delete_episode_btn, self._suggest_episodes_btn,
             self._review_btn,
         ):
             widget.setEnabled(enabled)
@@ -514,6 +555,7 @@ class PlayerWindow(QMainWindow):
         self._load_perception(recording)
         self._refresh_annotation_view()
         self._load_events()
+        self._load_episodes()
         self._load_review_queue(recording)
         self.setWindowTitle(f"Recording Player — {recording.directory.name}")
         self._seek_to(0.0)
@@ -538,6 +580,12 @@ class PlayerWindow(QMainWindow):
         self._events_combo.blockSignals(False)
         self._events_status.setText("")
         self._delete_event_btn.setEnabled(False)
+        self._episodes = []
+        self._episodes_combo.blockSignals(True)
+        self._episodes_combo.clear()
+        self._episodes_combo.blockSignals(False)
+        self._episodes_status.setText("")
+        self._delete_episode_btn.setEnabled(False)
         self._edit_annotations_btn.setChecked(False)
         self._show_annotations.setChecked(False)
         self._annotation_overlay.set_editing(False)
@@ -1025,6 +1073,97 @@ class PlayerWindow(QMainWindow):
                 return clip.edited_time(t)
         return t
 
+    # -------------------------------------------------------------- episodes
+
+    def _load_episodes(self) -> None:
+        """Load stored episodes (episodes.jsonl) into the navigation combo."""
+        if self._recording is None:
+            return
+        self._episodes = read_episodes(self._recording.directory)
+        self._episodes_combo.blockSignals(True)
+        self._episodes_combo.clear()
+        for i, episode in enumerate(self._episodes, 1):
+            self._episodes_combo.addItem(
+                f"{i}: {episode.start:.2f}s-{episode.end:.2f}s", episode
+            )
+        self._episodes_combo.blockSignals(False)
+        self._delete_episode_btn.setEnabled(bool(self._episodes))
+        if self._episodes:
+            self._episodes_status.setText(f"{len(self._episodes)} episode(s)")
+        else:
+            self._episodes_status.setText(
+                "No episodes — select a region and press ＋ New Episode, or Suggest…"
+            )
+        self._refresh_timeline_view()
+
+    def _on_episode_selected(self, index: int) -> None:
+        """Jump from the Episodes combo to the episode's start frame."""
+        if index < 0 or index >= len(self._episodes) or self._recording is None:
+            return
+        episode = self._episodes[index]
+        self._seek_to(episode.start)
+        self._current_t = episode.start
+        self._update_state_views(episode.start)
+        self._timeline.set_playhead(self._raw_to_edited(episode.start))
+        self._update_time_label()
+        reason = f" ({episode.reason})" if episode.reason else ""
+        self._status(
+            f"Episode {index + 1}: {episode.start:.2f}s-{episode.end:.2f}s{reason}"
+        )
+
+    def _on_add_episode(self) -> None:
+        """Turn the timeline selection into a manual episode (derived data only)."""
+        if self._recording is None:
+            return
+        selection = self._selection()
+        if not selection:
+            self._warn_no_selection()
+            return
+        edited_start, edited_end = selection
+        raw_start = self._edited_to_raw(edited_start)
+        raw_end = self._edited_to_raw(edited_end - 1e-9)
+        if raw_start is None or raw_end is None or raw_end <= raw_start:
+            QMessageBox.warning(
+                self, "Add Episode",
+                "The selection lies entirely inside a removed region.",
+            )
+            return
+        recording = load_recording(self._recording.directory)
+        raw_start = recording.snap_to_frame(raw_start)
+        raw_end = recording.snap_to_frame(raw_end)
+        episode = Episode(start=raw_start, end=raw_end, reason="manual")
+        episodes = merge_episodes(read_episodes(self._recording.directory), [episode])
+        write_episodes(self._recording.directory, episodes)
+        self._load_episodes()
+        self._status(f"Added episode {edited_start:.2f}s-{edited_end:.2f}s")
+
+    def _on_delete_episode(self) -> None:
+        """Remove the selected episode (derived metadata only, raw untouched)."""
+        if self._recording is None:
+            return
+        index = self._episodes_combo.currentIndex()
+        if index < 0 or index >= len(self._episodes):
+            return
+        episode = self._episodes[index]
+        episodes = [
+            e for e in read_episodes(self._recording.directory) if e != episode
+        ]
+        write_episodes(self._recording.directory, episodes)
+        self._load_episodes()
+        self._status(
+            f"Deleted episode {index + 1} ({episode.start:.2f}s-{episode.end:.2f}s)"
+        )
+
+    def _on_suggest_episodes(self) -> None:
+        """Suggest episodes from recording signals (derived metadata only)."""
+        if self._recording is None:
+            return
+        recording = load_recording(self._recording.directory)
+        dialog = EpisodeSuggestDialog(recording, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._load_episodes()
+            self._status(f"Applied {len(dialog.episodes)} suggested episode(s)")
+
     # --------------------------------------------------------- review queue
 
     def _load_review_queue(self, recording: RecordingData) -> None:
@@ -1125,6 +1264,16 @@ class PlayerWindow(QMainWindow):
                     )
                     return
             self._status(f"Event: {label} at {raw_t:.2f}s")
+            return
+        if kind == "episode":
+            for i, episode in enumerate(self._episodes, 1):
+                if episode.start - 1e-6 <= raw_t < episode.end + 1e-6:
+                    reason = f" ({episode.reason})" if episode.reason else ""
+                    self._status(
+                        f"Episode {i}: {episode.start:.2f}s-{episode.end:.2f}s{reason}"
+                    )
+                    return
+            self._status(f"Episode boundary at {raw_t:.2f}s")
             return
         if kind != "human" or self._annotations is None:
             return
@@ -1480,6 +1629,19 @@ class PlayerWindow(QMainWindow):
             raw.append({"t": t, "kind": "prediction", "label": "perception"})
         for event in self._events:
             raw.append({"t": event.start_t, "kind": "event", "label": f"{event.kind} {event.label}"})
+        for episode in self._episodes:
+            reason = f" {episode.reason}" if episode.reason else ""
+            raw.append(
+                {"t": episode.start, "kind": "episode", "label": f"episode{reason}"}
+            )
+        if self._episodes:
+            raw.append(
+                {
+                    "t": self._episodes[-1].end,
+                    "kind": "episode",
+                    "label": "episode end",
+                }
+            )
         ticks = []
         for item in remap_events(raw, self._session.timeline):
             ticks.append((float(item["t"]), str(item["kind"]), str(item.get("label") or "")))

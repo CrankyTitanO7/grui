@@ -61,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
     suggest.add_argument("--no-markers", action="store_true", help="ignore episode: markers")
     suggest.add_argument("--visual", action="store_true",
                          help="also detect scene changes in the video (reads frames)")
+    suggest.add_argument("--use-events", action="store_true",
+                         help="also split at derived perception event starts (perception/events.jsonl)")
+    suggest.add_argument("--use-input-changes", action="store_true",
+                         help="also split where the held keys/buttons change sharply")
     suggest.add_argument("--max-episode-s", type=float, default=None,
                          help="split episodes longer than N seconds")
     suggest.add_argument("--save", action="store_true",
@@ -245,6 +249,8 @@ def _cmd_episodes_suggest(args: argparse.Namespace) -> int:
         min_inactivity=args.min_inactivity,
         use_markers=not args.no_markers,
         use_visual=args.visual,
+        use_events=args.use_events,
+        use_input_changes=args.use_input_changes,
         max_episode_s=args.max_episode_s,
     )
     for i, episode in enumerate(episodes, 1):

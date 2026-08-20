@@ -88,6 +88,46 @@ def marker_boundaries(recording: RecordingData) -> list[float]:
     return boundaries
 
 
+def event_start_boundaries(recording: RecordingData) -> list[float]:
+    """Boundaries where derived perception events begin.
+
+    Each derived event (perception/events.jsonl) marks a moment where the
+    model decided a situation/appearance changed, so its start time is a
+    natural episode boundary. Frames at either end are ignored so the first
+    and last event never collapse the surrounding episode.
+    """
+    from perception.events import read_events
+
+    events = read_events(recording.directory)
+    starts = sorted({float(e.start_t) for e in events if e.start_t is not None})
+    return [t for t in starts if 1e-6 < t < recording.duration - 1e-6]
+
+
+def input_change_boundaries(
+    recording: RecordingData, *, min_toggle: int = 2
+) -> list[float]:
+    """Boundaries where the held-key/button set changed sharply.
+
+    A boundary is placed at every frame where the active input set differs
+    from the previous frame by at least ``min_toggle`` key/button codes at
+    once — e.g. a new window stealing focus, a chord press, or a hand
+    landing on the keyboard.
+    """
+    if len(recording.frame_times) < 2:
+        return []
+    keys = KeyStateTimeline(recording.events)
+    boundaries: list[float] = []
+    first = True
+    previous: frozenset[str] = frozenset()
+    for t in recording.frame_times:
+        active = frozenset(keys.active_keys_at(t)) | frozenset(keys.active_buttons_at(t))
+        if not first and len(active ^ previous) >= min_toggle:
+            boundaries.append(float(t))
+        previous = active
+        first = False
+    return boundaries
+
+
 def visual_change_boundaries(
     recording: RecordingData,
     *,
@@ -137,8 +177,11 @@ def suggest_episodes(
     recording: RecordingData,
     *,
     min_inactivity: float = _DEFAULT_MIN_INACTIVITY_S,
+    use_inactivity: bool = True,
     use_markers: bool = True,
     use_visual: bool = False,
+    use_events: bool = False,
+    use_input_changes: bool = False,
     max_episode_s: float | None = None,
 ) -> list[Episode]:
     """Suggest episodes from inactivity, markers and (optionally) visuals.
@@ -148,14 +191,21 @@ def suggest_episodes(
     splits any episode longer than that at the nearest boundary (or evenly).
     """
     boundaries: dict[float, list[str]] = {}
-    for t in input_gap_boundaries(recording, min_inactivity=min_inactivity):
-        boundaries.setdefault(t, []).append("inactivity")
+    if use_inactivity:
+        for t in input_gap_boundaries(recording, min_inactivity=min_inactivity):
+            boundaries.setdefault(t, []).append("inactivity")
     if use_markers:
         for t in marker_boundaries(recording):
             boundaries.setdefault(t, []).append("marker")
     if use_visual:
         for t in visual_change_boundaries(recording):
             boundaries.setdefault(t, []).append("visual")
+    if use_events:
+        for t in event_start_boundaries(recording):
+            boundaries.setdefault(t, []).append("perception event")
+    if use_input_changes:
+        for t in input_change_boundaries(recording):
+            boundaries.setdefault(t, []).append("input jump")
 
     if not boundaries:
         duration = recording.duration

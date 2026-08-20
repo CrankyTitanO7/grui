@@ -10,12 +10,13 @@ key and its timestamp in the label at the bottom. Colors:
 * keyboard events — yellow dots
 * annotation ticks — cyan diamonds (perception) / green triangles (human)
 * event ticks — orange squares (derived high-level events)
+* episode ticks — blue bars (episode boundaries)
 * selection  — translucent orange with bright edge borders + duration label
 * playhead   — red line
 
 Annotation/event ticks sit in a thin lane under the main plot; clicking
 one emits ``annotationClicked(t, kind, label)`` instead of seeking
-(``kind`` is ``prediction`` | ``human`` | ``event``).
+(``kind`` is ``prediction`` | ``human`` | ``event`` | ``episode``).
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ _KEY_EVENT_COLOR = QColor(241, 196, 15)
 _ANNOTATION_COLOR = QColor(26, 188, 156)  # cyan — human annotation
 _PREDICTION_COLOR = QColor(150, 111, 214)  # purple — model proposal
 _EVENT_COLOR = QColor(230, 126, 34)  # orange — derived high-level event
+_EPISODE_COLOR = QColor(52, 152, 219)  # blue — episode boundary
 
 _DRAG_THRESHOLD_PX = 4.0
 
@@ -71,7 +73,7 @@ class TimelineWidget(QWidget):
 
     seeked = Signal(float)
     selectionChanged = Signal(object)
-    annotationClicked = Signal(float, str, str)  # (t, kind, label); kind in prediction|human
+    annotationClicked = Signal(float, str, str)  # (t, kind, label); kind in prediction|human|event|episode
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -247,6 +249,9 @@ class TimelineWidget(QWidget):
             elif kind == "event":
                 painter.setBrush(_EVENT_COLOR)
                 painter.drawRect(QRectF(x - 3, y - 3, 6, 6))
+            elif kind == "episode":
+                painter.setBrush(_EPISODE_COLOR)
+                painter.drawRect(QRectF(x - 1, lane.top(), 2, lane.height()))
             else:
                 painter.setBrush(_ANNOTATION_COLOR)
                 painter.drawPolygon(

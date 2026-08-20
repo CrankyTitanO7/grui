@@ -3,15 +3,18 @@
 Opened from the player window's episode row. The user checks which signals
 to use, tunes the inactivity threshold, presses "Suggest" to preview the
 resulting episodes, and "Apply" to write them to ``<recording>/episodes.jsonl``.
-Like the rest of episode segmentation this writes *derived metadata* only —
-the raw recording is never touched.
+Selecting an episode and pressing "Play segment" asks the player window to
+loop-play that raw-time range while the dialog stays open, so the suggested
+boundaries can be eyeballed against the actual frames. Like the rest of
+episode segmentation this writes *derived metadata* only — the raw recording
+is never touched.
 """
 
 from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,7 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 class EpisodeSuggestDialog(QDialog):
-    """Preview and apply episode boundaries suggested from recording signals."""
+    """Preview and apply episode boundaries suggested from recording signals.
+
+    Emits ``playRequested(start, end)`` when the user picks a preview episode
+    (the player window loops that raw-time range), ``stopRequested()`` to end
+    the loop, and ``applied()`` after writing episodes.jsonl.
+    """
+
+    playRequested = Signal(float, float)  # (start, end) in raw recording time
+    stopRequested = Signal()
+    applied = Signal()
 
     def __init__(self, recording: RecordingData, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -107,7 +119,26 @@ class EpisodeSuggestDialog(QDialog):
 
         self._list = QListWidget()
         self._list.setMinimumHeight(180)
+        self._list.setToolTip("Select an episode, then press 'Play segment' to loop it in the player")
+        self._list.itemDoubleClicked.connect(lambda _item: self._on_play_segment())
         layout.addWidget(self._list, 1)
+
+        preview = QHBoxLayout()
+        self._play_segment_btn = QPushButton("▶ Play segment")
+        self._play_segment_btn.setToolTip(
+            "Loop-play the selected episode's frame range in the player window"
+        )
+        self._play_segment_btn.clicked.connect(self._on_play_segment)
+        self._stop_segment_btn = QPushButton("■ Stop")
+        self._stop_segment_btn.setToolTip("Stop looping the segment preview")
+        self._stop_segment_btn.clicked.connect(self.stopRequested.emit)
+        preview_hint = QLabel("Click outside the dialog to watch the player loop the segment.")
+        preview_hint.setStyleSheet("color: #666666;")
+        preview.addWidget(self._play_segment_btn)
+        preview.addWidget(self._stop_segment_btn)
+        preview.addWidget(preview_hint)
+        preview.addStretch(1)
+        layout.addLayout(preview)
 
         buttons = QHBoxLayout()
         self._suggest_btn = QPushButton("Suggest")
@@ -157,6 +188,14 @@ class EpisodeSuggestDialog(QDialog):
                 f"({episode.reason or 'full'})"
             )
         self._preview_status.setText(f"{len(episodes)} episode(s)")
+        self._play_segment_btn.setEnabled(bool(episodes))
+
+    def _on_play_segment(self) -> None:
+        """Ask the player to loop-play the raw-time range of the selected episode."""
+        index = self._list.currentRow()
+        if 0 <= index < len(self.episodes):
+            episode = self.episodes[index]
+            self.playRequested.emit(episode.start, episode.end)
 
     def _on_apply(self) -> None:
         if not self.episodes:
@@ -173,4 +212,5 @@ class EpisodeSuggestDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
         logger.info("wrote %d episodes → %s", len(self.episodes), path)
+        self.applied.emit()
         self.accept()

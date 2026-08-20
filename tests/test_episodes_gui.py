@@ -6,6 +6,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.ui.episode_suggest_dialog import EpisodeSuggestDialog
@@ -109,37 +110,97 @@ def test_delete_episode(window):
     assert stored[0].start == pytest.approx(0.2)
 
 
-class _FakeSuggestDialog:
-    """Mimics the real dialog: on accept it writes the episodes it computed."""
+class _FakeSuggestDialog(QObject):
+    """Mimics the (non-modal) real dialog interface."""
+
+    playRequested = Signal(float, float)
+    stopRequested = Signal()
+    applied = Signal()
+    finished = Signal(int)
 
     def __init__(self, recording, parent=None):
+        super().__init__()
+        self.episodes = []
+        self._recording = recording
+
+    def show(self):
         from dataset.episodes import suggest_episodes
 
         self.episodes = suggest_episodes(
-            recording,
+            self._recording,
             min_inactivity=0.0,
             use_markers=True,
             use_visual=False,
             use_events=False,
             use_input_changes=False,
         )
+        write_episodes(self._recording.directory, self.episodes)
+        self.applied.emit()  # stay open, like the real dialog
+
+    def raise_(self):
+        pass
+
+    def activateWindow(self):
+        pass
+
+    def close(self):
+        self.finished.emit(0)
 
 
 def test_suggest_episodes_applies(window, monkeypatch):
-    from PySide6.QtWidgets import QDialog
-
     recording = window._recording
-
-    class _Fake(_FakeSuggestDialog):
-        def exec(self):
-            write_episodes(recording.directory, self.episodes)
-            return QDialog.DialogCode.Accepted
-
-    monkeypatch.setattr("app.ui.player_window.EpisodeSuggestDialog", _Fake)
+    monkeypatch.setattr("app.ui.player_window.EpisodeSuggestDialog", _FakeSuggestDialog)
     window._on_suggest_episodes()
     stored = read_episodes(recording.directory)
     assert stored  # marker boundary at 0.5s -> >= 2 episodes
     assert window._episodes_combo.count() == len(stored)
+    dialog = window._episode_suggest_dialog
+    assert dialog is not None
+    dialog.close()  # closing drops the reference + stops the segment loop
+    assert window._episode_suggest_dialog is None
+
+
+def test_suggest_opens_single_dialog(window, monkeypatch):
+    monkeypatch.setattr("app.ui.player_window.EpisodeSuggestDialog", _FakeSuggestDialog)
+    window._on_suggest_episodes()
+    first = window._episode_suggest_dialog
+    window._on_suggest_episodes()  # re-click raises instead of creating another
+    assert window._episode_suggest_dialog is first
+    first.close()
+    assert window._episode_suggest_dialog is None
+
+
+def test_preview_segment_starts_looping_playback(window):
+    window._preview_segment(0.4, 1.2)
+    assert window._loop_range == (0.4, 1.2)
+    assert window._playing is True
+    assert window._current_t == pytest.approx(0.4)
+
+
+def test_clear_segment_loop(window):
+    window._preview_segment(0.4, 1.2)
+    window._clear_segment_loop()
+    assert window._loop_range is None
+
+
+def test_loop_gate_drops_frames_outside_range(window):
+    import numpy as np
+
+    rec = window._recording
+    window._preview_segment(0.4, 0.9)
+    inside = rec.nearest_frame_index(0.5)
+    window._display_frame(inside, np.zeros((4, 8, 3), dtype=np.uint8))
+    assert window._current_t == pytest.approx(rec.frame_time(inside))
+    outside = rec.nearest_frame_index(1.2)
+    window._display_frame(outside, np.zeros((4, 8, 3), dtype=np.uint8))
+    assert window._current_t == pytest.approx(rec.frame_time(inside))
+
+
+def test_stop_clears_loop(window):
+    window._preview_segment(0.4, 1.2)
+    window._on_stop()
+    assert window._loop_range is None
+    assert window._playing is False
 
 
 def test_episode_ticks_appear_in_timeline(window):
@@ -159,3 +220,13 @@ def test_suggest_dialog_previews_and_applies(window):
     stored = read_episodes(recording.directory)
     assert stored == dialog.episodes
     assert dialog.result() == EpisodeSuggestDialog.DialogCode.Accepted
+
+
+def test_suggest_dialog_emits_play_request(window):
+    recording = window._recording
+    dialog = EpisodeSuggestDialog(recording)
+    received = []
+    dialog.playRequested.connect(lambda start, end: received.append((start, end)))
+    dialog._list.setCurrentRow(0)
+    dialog._on_play_segment()
+    assert received == [(dialog.episodes[0].start, dialog.episodes[0].end)]

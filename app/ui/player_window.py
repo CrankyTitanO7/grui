@@ -108,6 +108,8 @@ class PlayerWindow(QMainWindow):
         self._events: list[Event] = []
         self._episodes: list[Episode] = []
         self._review_queue = None
+        self._loop_range: tuple[float, float] | None = None
+        self._episode_suggest_dialog: EpisodeSuggestDialog | None = None
 
         self._select_all_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.SelectAll), self)
         self._select_all_shortcut.activated.connect(self._on_select_all)
@@ -586,6 +588,10 @@ class PlayerWindow(QMainWindow):
         self._episodes_combo.blockSignals(False)
         self._episodes_status.setText("")
         self._delete_episode_btn.setEnabled(False)
+        self._loop_range = None
+        if self._episode_suggest_dialog is not None:
+            self._episode_suggest_dialog.close()
+            self._episode_suggest_dialog = None
         self._edit_annotations_btn.setChecked(False)
         self._show_annotations.setChecked(False)
         self._annotation_overlay.set_editing(False)
@@ -641,6 +647,15 @@ class PlayerWindow(QMainWindow):
         if self._recording is None:
             return
         t = self._recording.frame_time(frame_index)
+        if self._loop_range is not None:
+            start, end = self._loop_range
+            if t < start - 1e-6 or t >= end:
+                # Segment preview: drop everything outside [start, end) and
+                # loop back to the start once the end is reached.
+                self._seek_to(start)
+                if not self._reader.playing:
+                    self._reader.set_playing(True)
+                return
         self._current_t = t
         self._current_frame_index = frame_index
         self._current_frame = frame
@@ -711,6 +726,7 @@ class PlayerWindow(QMainWindow):
 
     def _on_stop(self) -> None:
         self._playing = False
+        self._loop_range = None
         if self._reader is not None:
             self._reader.set_playing(False)
         self._play_btn.setText("▶ Play")
@@ -724,6 +740,29 @@ class PlayerWindow(QMainWindow):
         self._play_btn.setText("▶ Play")
         current_index = self._recording.nearest_frame_index(self._current_t) if self._recording else 0
         self._seek_to_index(current_index + 1)
+
+    def _preview_segment(self, start: float, end: float) -> None:
+        """Loop-play a raw-time segment (used by the episode suggest dialog)."""
+        if self._recording is None or self._reader is None:
+            return
+        self._loop_range = (start, end)
+        self._seek_to(start)
+        self._current_t = start
+        self._update_state_views(start)
+        self._timeline.set_playhead(self._raw_to_edited(start))
+        self._update_time_label()
+        if not self._playing:
+            self._playing = True
+            self._at_end = False
+            self._reader.set_playing(True)
+            self._play_btn.setText("⏸ Pause")
+        self._status(f"Looping segment {start:.2f}s-{end:.2f}s — press Stop to exit")
+
+    def _clear_segment_loop(self) -> None:
+        """End the segment preview loop without resetting playback position."""
+        if self._loop_range is not None:
+            self._loop_range = None
+            self._status("Segment preview stopped")
 
     def _seek_to_index(self, frame_index: int) -> None:
         if self._reader is None:
@@ -1155,14 +1194,33 @@ class PlayerWindow(QMainWindow):
         )
 
     def _on_suggest_episodes(self) -> None:
-        """Suggest episodes from recording signals (derived metadata only)."""
+        """Open the (non-modal) episode suggest dialog for this recording.
+
+        The dialog stays open so the user can preview a suggested segment as
+        a loop in the player window while tuning the signals.
+        """
         if self._recording is None:
+            return
+        if self._episode_suggest_dialog is not None:
+            self._episode_suggest_dialog.raise_()
+            self._episode_suggest_dialog.activateWindow()
             return
         recording = load_recording(self._recording.directory)
         dialog = EpisodeSuggestDialog(recording, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._load_episodes()
-            self._status(f"Applied {len(dialog.episodes)} suggested episode(s)")
+        dialog.playRequested.connect(self._preview_segment)
+        dialog.stopRequested.connect(self._clear_segment_loop)
+        dialog.applied.connect(self._on_episodes_applied)
+        dialog.finished.connect(self._on_suggest_dialog_finished)
+        self._episode_suggest_dialog = dialog
+        dialog.show()
+
+    def _on_episodes_applied(self) -> None:
+        self._load_episodes()
+        self._status(f"Applied {len(self._episodes)} suggested episode(s)")
+
+    def _on_suggest_dialog_finished(self, _result: int) -> None:
+        self._episode_suggest_dialog = None
+        self._clear_segment_loop()
 
     # --------------------------------------------------------- review queue
 

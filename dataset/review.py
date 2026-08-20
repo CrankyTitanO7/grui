@@ -26,7 +26,7 @@ from typing import Any, Callable, Protocol
 from annotation.store import load_annotations
 from annotation.types import AnnotationStatus
 from dataset.health import action_distribution
-from storage.recording import RecordingData
+from storage.recording import RecordingData, list_recordings, load_recording
 
 logger = logging.getLogger(__name__)
 
@@ -214,11 +214,124 @@ def annotation_uncertainty_candidates(recording: RecordingData, limit: int) -> l
     return items[:limit]
 
 
-STRATEGIES: dict[str, Callable[[RecordingData, int], list[ReviewItem]]] = {
+def transition_candidates(recording: RecordingData, limit: int) -> list[ReviewItem]:
+    """Frames where the situation or input state changed sharply.
+
+    A situation is the label set at a frame (annotations preferred, else
+    perception results); the input state is the set of held keys/buttons.
+    Change magnitude = how many situation labels and input codes toggled
+    since the previous frame — bigger jumps rank higher.
+    """
+    from dataset.coverage import frame_situations
+    from player.event_state import KeyStateTimeline
+
+    _, situations = frame_situations(recording, "auto")
+    keys = KeyStateTimeline(recording.events)
+    items: list[ReviewItem] = []
+    prev_situation: frozenset[str] = frozenset()
+    prev_active: frozenset[str] = frozenset()
+    for frame_index, t in enumerate(recording.frame_times):
+        situation = situations.get(frame_index, prev_situation)
+        active = frozenset(keys.active_keys_at(t)) | frozenset(keys.active_buttons_at(t))
+        situation_toggled = situation != prev_situation
+        input_toggled = active != prev_active
+        change = 0
+        if situation_toggled:
+            change += max(1, len(situation ^ prev_situation))
+        if input_toggled:
+            change += len(active ^ prev_active)
+        if change:
+            parts = []
+            if situation_toggled:
+                parts.append(f"situation -> {', '.join(sorted(situation)) or 'none'}")
+            if input_toggled:
+                parts.append(f"input -> {', '.join(sorted(active)) or 'idle'}")
+            items.append(
+                ReviewItem(
+                    frame_index=frame_index,
+                    t=float(t),
+                    reason="transition: " + "; ".join(parts),
+                    priority=min(_MAX_PRIORITY, 30.0 + 10.0 * change),
+                    kind="transition",
+                    data={"situation": sorted(situation), "keys": sorted(active)},
+                )
+            )
+            if len(items) >= limit:
+                return items
+        prev_situation, prev_active = situation, active
+    return items
+
+
+def coverage_candidates(
+    recording: RecordingData, limit: int, *, recording_root: Path | str | None = None
+) -> list[ReviewItem]:
+    """Frames in situations under-covered across a recordings root.
+
+    Reuses :func:`dataset.coverage.analyze` to find situations that appear
+    in fewer than 2 demonstrations; any frame of *this* recording whose
+    situation is among them becomes a candidate, with the coverage gap
+    driving the priority. Requires ``recording_root``; without it the
+    strategy is a no-op.
+    """
+    if recording_root is None:
+        return []
+    from dataset.coverage import analyze, frame_situations
+
+    root = Path(recording_root)
+    if (root / "metadata.json").exists():
+        try:
+            recordings = [load_recording(root)]
+        except ValueError:
+            return []
+    else:
+        try:
+            recordings = [load_recording(p) for p in list_recordings(root)]
+        except ValueError:
+            return []
+    if not recordings:
+        return []
+    report = analyze(recordings)
+    if not report.demos:
+        return []
+    _, own_situations = frame_situations(recording, "auto")
+    if not own_situations:
+        return []
+    floor = 2  # minimum demonstrations per situation (matches coverage renders)
+    under: dict[str, int] = {name: count for name, count, _ in report.under_covered(floor)}
+    if not under:
+        return []
+    items: list[ReviewItem] = []
+    for frame_index, labels in sorted(own_situations.items()):
+        name = _situation_name(labels)
+        count = under.get(name)
+        if count is None:
+            continue
+        items.append(
+            ReviewItem(
+                frame_index=frame_index,
+                t=float(recording.frame_time(frame_index)),
+                reason=f"under-covered situation {name!r} ({count} of {floor} demos)",
+                priority=min(_MAX_PRIORITY, 40.0 + (floor - count) * 20.0),
+                kind="frame",
+                data={"situation": sorted(labels), "demos": count},
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _situation_name(labels: frozenset[str]) -> str:
+    return "+".join(sorted(labels)) or "(empty)"
+
+
+STRATEGIES: dict[str, Callable[..., list[ReviewItem]]] = {
     "uncertainty": uncertainty_candidates,
     "rare_action": rare_action_candidates,
     "novelty": visual_novelty_candidates,
     "annotation_uncertainty": annotation_uncertainty_candidates,
+    "transition": transition_candidates,
+    "coverage": coverage_candidates,
 }
 
 
@@ -227,6 +340,7 @@ def build_queue(
     *,
     strategies: list[str] | None = None,
     limit: int = 200,
+    recording_root: Path | str | None = None,
 ) -> list[ReviewItem]:
     """Combine candidates from the selected strategies, deduplicated by frame."""
     selected = strategies or sorted(STRATEGIES)
@@ -235,7 +349,12 @@ def build_queue(
         raise ValueError(f"unknown review strategy(s): {', '.join(unknown)}")
     by_frame: dict[int, ReviewItem] = {}
     for name in selected:
-        for item in STRATEGIES[name](recording, limit):
+        fn = STRATEGIES[name]
+        if name == "coverage":
+            items = fn(recording, limit, recording_root=recording_root)
+        else:
+            items = fn(recording, limit)
+        for item in items:
             existing = by_frame.get(item.frame_index)
             if existing is None or item.priority > existing.priority:
                 by_frame[item.frame_index] = item

@@ -313,6 +313,16 @@ class PlayerWindow(QMainWindow):
         root.addLayout(ann_row)
 
         edit_ann_row = QHBoxLayout()
+        self._prev_ann_btn = QPushButton("◀")
+        self._prev_ann_btn.setToolTip(
+            "Previous annotation (navigate by time, wraps around)"
+        )
+        self._prev_ann_btn.clicked.connect(self._on_prev_annotation)
+        self._next_ann_btn = QPushButton("▶")
+        self._next_ann_btn.setToolTip(
+            "Next annotation (navigate by time, wraps around)"
+        )
+        self._next_ann_btn.clicked.connect(self._on_next_annotation)
         self._ann_label_edit = QLineEdit()
         self._ann_label_edit.setPlaceholderText("Selected annotation label…")
         self._ann_label_edit.setMaximumWidth(220)
@@ -330,6 +340,8 @@ class PlayerWindow(QMainWindow):
         self._redo_ann_btn.clicked.connect(self._on_annotation_redo)
         self._save_annotations_btn = QPushButton("Save Annotations")
         self._save_annotations_btn.clicked.connect(self._on_save_annotations)
+        edit_ann_row.addWidget(self._prev_ann_btn)
+        edit_ann_row.addWidget(self._next_ann_btn)
         edit_ann_row.addWidget(self._ann_label_edit)
         edit_ann_row.addWidget(self._apply_label_btn)
         edit_ann_row.addWidget(self._verify_btn)
@@ -354,11 +366,18 @@ class PlayerWindow(QMainWindow):
             "a region first (Stored under perception/events.jsonl, raw data untouched)"
         )
         self._add_event_btn.clicked.connect(self._on_add_event)
+        self._delete_event_btn = QPushButton("✕ Delete Event")
+        self._delete_event_btn.setToolTip(
+            "Remove the selected event from perception/events.jsonl "
+            "(derived data only, raw data untouched)"
+        )
+        self._delete_event_btn.clicked.connect(self._on_delete_event)
         self._events_status = QLabel("")
         self._events_status.setStyleSheet("color: #888888;")
         events_row.addWidget(self._events_label)
         events_row.addWidget(self._events_combo)
         events_row.addWidget(self._add_event_btn)
+        events_row.addWidget(self._delete_event_btn)
         events_row.addWidget(self._events_status, 1)
         root.addLayout(events_row)
 
@@ -400,7 +419,9 @@ class PlayerWindow(QMainWindow):
             self._undo_btn, self._redo_btn, self._reset_btn, self._save_btn,
             self._dataset_btn, self._perception_btn,
             self._show_annotations, self._edit_annotations_btn,
+            self._prev_ann_btn, self._next_ann_btn,
             self._events_combo, self._events_label, self._add_event_btn,
+            self._delete_event_btn,
             self._review_btn,
         ):
             widget.setEnabled(enabled)
@@ -516,6 +537,7 @@ class PlayerWindow(QMainWindow):
         self._events_combo.clear()
         self._events_combo.blockSignals(False)
         self._events_status.setText("")
+        self._delete_event_btn.setEnabled(False)
         self._edit_annotations_btn.setChecked(False)
         self._show_annotations.setChecked(False)
         self._annotation_overlay.set_editing(False)
@@ -907,6 +929,7 @@ class PlayerWindow(QMainWindow):
             )
             self._events_combo.addItem(f"{event.kind} {event.label} @ {span}", event)
         self._events_combo.blockSignals(False)
+        self._delete_event_btn.setEnabled(bool(self._events))
         if self._events:
             self._events_status.setText(f"{len(self._events)} derived event(s)")
         else:
@@ -969,6 +992,21 @@ class PlayerWindow(QMainWindow):
         self._load_events()
         self._status(f"Added {dialog.kind} event at {edited_start:.2f}s-{edited_end:.2f}s")
 
+    def _on_delete_event(self) -> None:
+        """Remove the selected event (derived data only, raw untouched)."""
+        if self._recording is None:
+            return
+        index = self._events_combo.currentIndex()
+        if index < 0 or index >= len(self._events):
+            return
+        event = self._events[index]
+        events = [
+            e for e in read_events(self._recording.directory) if e != event
+        ]
+        write_events(self._recording.directory, events)
+        self._load_events()
+        self._status(f"Deleted {event.kind} event at {event.start_t:.2f}s")
+
     def _edited_to_raw(self, t: float) -> float | None:
         """Map an edited-timeline time to raw source time (None if removed)."""
         if self._session is None:
@@ -1017,7 +1055,12 @@ class PlayerWindow(QMainWindow):
         self._review_queue = ReviewQueue(self._recording)
         self._review_queue.refresh()
         self._update_review_status()
-        dialog = ReviewDialog(self._review_queue, on_jump=self._review_jump_to, parent=self)
+        dialog = ReviewDialog(
+            self._review_queue,
+            on_jump=self._review_jump_to,
+            on_edit=self._review_edit_to,
+            parent=self,
+        )
         dialog.finished.connect(self._on_review_done)
         dialog.exec()
 
@@ -1043,6 +1086,15 @@ class PlayerWindow(QMainWindow):
         self._timeline.set_playhead(self._raw_to_edited(t))
         self._update_time_label()
         self._status(f"Review: frame {frame_index} at {_format_time(t)}")
+
+    def _review_edit_to(self, frame_index: int) -> None:
+        """Open a review-candidate frame in the annotation editor (§17 Edit)."""
+        if self._recording is None or self._reader is None:
+            return
+        self._review_jump_to(frame_index)
+        self._show_annotations.setChecked(True)
+        self._edit_annotations_btn.setChecked(True)
+        self._status(f"Annotations + edit mode on — frame {frame_index} (close Review to edit)")
 
     # --------------------------------------------------------- annotations
 
@@ -1180,6 +1232,44 @@ class PlayerWindow(QMainWindow):
             self._status("This model box is already imported — selected the existing annotation")
         return existing
 
+    def _on_prev_annotation(self) -> None:
+        """Jump to the annotation before the playhead (§14 navigation)."""
+        self._step_annotation(-1)
+
+    def _on_next_annotation(self) -> None:
+        """Jump to the annotation after the playhead (§14 navigation)."""
+        self._step_annotation(1)
+
+    def _step_annotation(self, direction: int) -> None:
+        if self._annotations is None or not self._annotations:
+            return
+        annotations = sorted(self._annotations, key=lambda a: (a.t, a.frame_index))
+        if direction > 0:
+            target = next(
+                (a for a in annotations if a.t > self._current_t + 1e-6),
+                annotations[0],
+            )
+        else:
+            target = next(
+                (a for a in reversed(annotations) if a.t < self._current_t - 1e-6),
+                annotations[-1],
+            )
+        self._seek_to(target.t)
+        self._current_t = target.t
+        self._selected_annotation_id = target.id
+        self._ann_label_edit.setText(target.label)
+        self._ann_label_edit.setEnabled(True)
+        self._apply_label_btn.setEnabled(True)
+        self._verify_btn.setEnabled(True)
+        self._delete_ann_btn.setEnabled(True)
+        self._update_state_views(target.t)
+        self._timeline.set_playhead(self._raw_to_edited(target.t))
+        self._update_time_label()
+        self._update_annotation_overlay()
+        self._annotation_overlay.select_annotation(target.id)
+        self._update_annotation_status_text()
+        self._status(f"Annotation {target.label or '(untitled)'} at {target.t:.2f}s")
+
     def _on_annotation_selected(self, annotation_id: str) -> None:
         annotation = self._annotations.get(annotation_id) if self._annotations else None
         if annotation is None and annotation_id.startswith("perception:"):
@@ -1283,7 +1373,7 @@ class PlayerWindow(QMainWindow):
 
     def _candidate_boxes(
         self, frame_index: int
-    ) -> list[tuple[str, str, str, tuple[float, float, float, float]]]:
+    ) -> list[tuple[str, str, str, tuple[float, float, float, float], float | None]]:
         """Model detections for a frame, drawn as clickable overlay boxes.
 
         Unimported detections become dashed ``prediction`` boxes (clicking
@@ -1304,12 +1394,12 @@ class PlayerWindow(QMainWindow):
             if annotation is not None:
                 boxes.append(
                     (annotation.id, annotation.label or "(untitled)", annotation.status.value,
-                     (x1, y1, x2, y2))
+                     (x1, y1, x2, y2), annotation.confidence)
                 )
             else:
                 boxes.append(
                     (f"perception:{frame_index}:{i}", detection.label, "prediction",
-                     (x1, y1, x2, y2))
+                     (x1, y1, x2, y2), detection.confidence)
                 )
         return boxes
 
@@ -1323,7 +1413,7 @@ class PlayerWindow(QMainWindow):
         if not show_annotations and not (show_candidates and self._perception):
             self._annotation_overlay.hide()
             return
-        boxes: list[tuple[str, str, str, tuple[float, float, float, float]]] = []
+        boxes: list[tuple[str, str, str, tuple[float, float, float, float], float | None]] = []
         if show_annotations:
             boxes.extend(self._annotation_boxes(frame_index))
         if show_candidates:
@@ -1337,7 +1427,7 @@ class PlayerWindow(QMainWindow):
 
     def _annotation_boxes(
         self, frame_index: int
-    ) -> list[tuple[str, str, str, tuple[float, float, float, float]]]:
+    ) -> list[tuple[str, str, str, tuple[float, float, float, float], float | None]]:
         """Annotations for a frame; tolerates boxes stored in raw pixels."""
         width = self._recording.width if self._recording else 0
         height = self._recording.height if self._recording else 0
@@ -1348,7 +1438,7 @@ class PlayerWindow(QMainWindow):
             if width > 0 and height > 0 and max(x1, y1, x2, y2) > 1.0:
                 x1, y1, x2, y2 = x1 / width, y1 / height, x2 / width, y2 / height
             boxes.append(
-                (a.id, a.label or "(untitled)", a.status.value, (x1, y1, x2, y2))
+                (a.id, a.label or "(untitled)", a.status.value, (x1, y1, x2, y2), a.confidence)
             )
         return boxes
 
@@ -1358,6 +1448,8 @@ class PlayerWindow(QMainWindow):
             self._annotation_status.setText("No annotations file")
             self._edit_annotations_btn.setEnabled(False)
             self._import_annotations_btn.setEnabled(False)
+            self._prev_ann_btn.setEnabled(False)
+            self._next_ann_btn.setEnabled(False)
             self._undo_ann_btn.setEnabled(False)
             self._redo_ann_btn.setEnabled(False)
             self._save_annotations_btn.setEnabled(False)
@@ -1368,6 +1460,8 @@ class PlayerWindow(QMainWindow):
             f"{total} annotations ({verified} verified, {total - verified} pending)"
         )
         self._save_annotations_btn.setEnabled(True)
+        self._prev_ann_btn.setEnabled(True)
+        self._next_ann_btn.setEnabled(True)
         self._undo_ann_btn.setEnabled(annotations.can_undo)
         self._redo_ann_btn.setEnabled(annotations.can_redo)
 

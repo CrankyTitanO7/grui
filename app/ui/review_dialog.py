@@ -44,11 +44,13 @@ class ReviewDialog(QDialog):
         self,
         queue: ReviewQueue,
         on_jump: Callable[[int], None] | None = None,
+        on_edit: Callable[[int], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.queue = queue
         self.on_jump = on_jump
+        self.on_edit = on_edit
         self.setWindowTitle("Review Queue")
         self.resize(760, 420)
 
@@ -72,6 +74,12 @@ class ReviewDialog(QDialog):
         self._show_decided.stateChanged.connect(lambda _state: self._refresh_list())
         self._jump_btn = QPushButton("⏭ Jump to frame")
         self._jump_btn.clicked.connect(self._on_jump)
+        self._edit_btn = QPushButton("✎ Edit")
+        self._edit_btn.setToolTip(
+            "Open this frame in the annotation editor — annotations + edit "
+            "mode switch on behind the dialog (close Review to edit)"
+        )
+        self._edit_btn.clicked.connect(self._on_edit)
         self._accept_btn = QPushButton("✓ Accept")
         self._accept_btn.setToolTip("Verify the frame's model annotations")
         self._accept_btn.clicked.connect(lambda: self._decide("accept"))
@@ -80,12 +88,13 @@ class ReviewDialog(QDialog):
         self._reject_btn.clicked.connect(lambda: self._decide("reject"))
         self._skip_btn = QPushButton("Skip")
         self._skip_btn.clicked.connect(lambda: self._decide("skip"))
-        for button in (self._refresh_btn, self._jump_btn, self._accept_btn, self._reject_btn, self._skip_btn):
+        for button in (self._refresh_btn, self._jump_btn, self._edit_btn, self._accept_btn, self._reject_btn, self._skip_btn):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         row.addWidget(self._refresh_btn)
         row.addWidget(self._show_decided)
         row.addStretch(1)
         row.addWidget(self._jump_btn)
+        row.addWidget(self._edit_btn)
         row.addWidget(self._accept_btn)
         row.addWidget(self._reject_btn)
         row.addWidget(self._skip_btn)
@@ -124,6 +133,7 @@ class ReviewDialog(QDialog):
     def _update_buttons(self) -> None:
         enabled = self._selected_item() is not None
         self._jump_btn.setEnabled(enabled)
+        self._edit_btn.setEnabled(enabled)
         self._accept_btn.setEnabled(enabled)
         self._reject_btn.setEnabled(enabled)
         self._skip_btn.setEnabled(enabled)
@@ -143,6 +153,12 @@ class ReviewDialog(QDialog):
         if item is None or self.on_jump is None:
             return
         self.on_jump(item.frame_index)
+
+    def _on_edit(self) -> None:
+        item = self._selected_item()
+        if item is None or self.on_edit is None:
+            return
+        self.on_edit(item.frame_index)
 
     def _decide(self, verdict: str) -> None:
         item = self._selected_item()

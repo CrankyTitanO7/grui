@@ -181,6 +181,7 @@ def render_report(
     *,
     min_demos: int = 2,
     max_situations: int = 15,
+    recordings: list[RecordingData] | None = None,
 ) -> str:
     """Human-readable ASCII coverage report (cp1252-safe glyphs only)."""
     lines = [
@@ -239,6 +240,19 @@ def render_report(
                 )
         else:
             lines.append(f"\nAll situations appear in at least {min_demos} demonstrations.")
+
+    if recordings:
+        from dataset.health import action_distribution, rare_action_labels
+
+        rare: list[str] = []
+        for recording in recordings:
+            labels = rare_action_labels(action_distribution(recording))
+            if labels:
+                joined = ", ".join(f"{label} ({fraction * 100:.1f}%)" for label, fraction in labels)
+                rare.append(f"  {recording.directory.name}: {joined}")
+        if rare:
+            lines.append("\nRare actions (share < 5% of the top action, idle excluded):")
+            lines.extend(rare)
 
     return "\n".join(lines)
 

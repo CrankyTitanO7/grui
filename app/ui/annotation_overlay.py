@@ -44,12 +44,14 @@ _CREATE_COLOR = QColor("#4dd0e1")
 class _Box:
     """Client-side overlay item mirroring one annotation for this frame."""
 
-    __slots__ = ("id", "label", "status", "x1", "y1", "x2", "y2")
+    __slots__ = ("id", "label", "status", "confidence", "x1", "y1", "x2", "y2")
 
-    def __init__(self, annotation_id: str, label: str, status: str, bbox: tuple[float, float, float, float]):
+    def __init__(self, annotation_id: str, label: str, status: str, bbox: tuple[float, float, float, float],
+                 confidence: float | None = None):
         self.id = annotation_id
         self.label = label
         self.status = status
+        self.confidence = confidence
         self.x1, self.y1, self.x2, self.y2 = bbox
 
     def pixel_rect(self, w: float, h: float) -> QRectF:
@@ -83,9 +85,12 @@ class AnnotationOverlay(QWidget):
 
     # ------------------------------------------------------------ state
 
-    def set_annotations(self, boxes: list[tuple[str, str, str, tuple[float, float, float, float]]]) -> None:
-        """Replace annotated boxes: (id, label, status, (x1, y1, x2, y2)) normalized."""
-        self._boxes = [_Box(aid, label, status, bbox) for aid, label, status, bbox in boxes]
+    def set_annotations(self, boxes: list[tuple[str, str, str, tuple[float, float, float, float], float | None]]) -> None:
+        """Replace annotated boxes: (id, label, status, (x1, y1, x2, y2), confidence?) normalized."""
+        self._boxes = [
+            _Box(aid, label, status, bbox, confidence)
+            for aid, label, status, bbox, confidence in boxes
+        ]
         self.update()
 
     def select_annotation(self, annotation_id: str | None) -> None:
@@ -194,7 +199,7 @@ class AnnotationOverlay(QWidget):
             return
         if self._drag == "create":
             x1, y1, x2, y2 = self._create_box
-            if abs((x2 - x1) * self.width()) >= _CREATE_MIN_SIZE and abs((y2 - y1) * self.height()) >= _CREATE_MIN_SIZE:
+            if abs(x2 - x1) >= _CREATE_MIN_SIZE and abs(y2 - y1) >= _CREATE_MIN_SIZE:
                 nx1, nx2 = sorted((x1 / self.width(), x2 / self.width()))
                 ny1, ny2 = sorted((y1 / self.height(), y2 / self.height()))
                 self.annotationCreated.emit(nx1, ny1, nx2, ny2)
@@ -215,6 +220,7 @@ class AnnotationOverlay(QWidget):
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._hover_handle = None
         self.setCursor(Qt.CursorShape.ArrowCursor if self._editing else Qt.CursorShape.CrossCursor)
+        self.setToolTip("")
         super().leaveEvent(event)
 
     def _update_hover(self, x: float, y: float) -> None:
@@ -231,6 +237,12 @@ class AnnotationOverlay(QWidget):
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
         self._hover_handle = handle
+        tip = ""
+        if box is not None:
+            tip = f"{box.label}  [{box.status}]"
+            if box.confidence is not None:
+                tip += f"  confidence={box.confidence:.2f}"
+        self.setToolTip(tip)
 
     def _selected_box(self) -> _Box | None:
         if self._selected_id is None:

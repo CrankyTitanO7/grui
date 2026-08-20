@@ -176,9 +176,69 @@ def action_distribution(recording: RecordingData) -> ActionDistribution:
     return dist
 
 
+def normalize_chord_code(token: str) -> str:
+    """'A' -> 'KeyA'; already-qualified codes (Key…, mouse:…) kept verbatim."""
+    token = token.strip()
+    if token.startswith(("Key", "mouse:")) or token in ("None", "MOUSE_MOVE"):
+        return token
+    return f"Key{token}"
+
+
+def parse_chord(text: str) -> tuple[str, ...]:
+    """'A + SPACE' -> ('KeyA', 'KeySPACE'); single bare codes also accepted."""
+    return tuple(sorted(normalize_chord_code(part) for part in text.split("+")))
+
+
+def recording_has_chord(recording: RecordingData, chord: tuple[str, ...]) -> bool:
+    """True when any sampled frame held all codes of ``chord`` at once."""
+    dist = action_distribution(recording)
+    wanted = set(chord)
+    return any(wanted <= set(active) for active in dist.chords)
+
+
+def filter_demos(
+    root: Path | str, contains: list[tuple[str, ...]]
+) -> list[tuple[str, int, int]]:
+    """(name, total_frames, matching_frames) for demos hitting any requested chord."""
+    root = Path(root)
+    if (root / "metadata.json").exists():
+        directories = [root]
+    else:
+        directories = [p for p in list_recordings(root)]
+    out: list[tuple[str, int, int]] = []
+    for directory in directories:
+        try:
+            recording = load_recording(directory)
+        except ValueError:
+            continue
+        dist = action_distribution(recording)
+        matches = 0
+        for active, count in dist.chords.items():
+            if any(set(wanted) <= set(active) for wanted in contains):
+                matches += count
+        if matches:
+            out.append((directory.name, len(recording.frame_times), matches))
+    return out
+
+
+def rare_action_labels(
+    dist: ActionDistribution, *, threshold: float = 0.05
+) -> list[tuple[str, float]]:
+    """Actions below ``threshold`` * the top share (idle excluded)."""
+    shares = dist._shares(ignore_idle=True)
+    if not shares:
+        return []
+    top = shares[0][1]
+    if top <= 0:
+        return []
+    return [
+        (label, fraction)
+        for label, fraction in shares
+        if label and fraction < threshold * top
+    ]
+
+
 # --------------------------------------------------------------------------- quality
-
-
 @dataclass(frozen=True)
 class QualityIssue:
     """One detected dataset-health problem."""
@@ -188,7 +248,7 @@ class QualityIssue:
     message: str
 
     def render(self) -> str:
-        mark = {"error": "✗", "warning": "⚠", "info": "·"}.get(self.severity, "·")
+        mark = {"error": "x", "warning": "!", "info": "."}.get(self.severity, ".")
         return f"{mark} [{self.category}] {self.message}"
 
 
@@ -397,7 +457,7 @@ def render_action_distribution(dist: ActionDistribution) -> str:
         lines.append("(no actions recorded)")
         return "\n".join(lines)
     for label, fraction in shares:
-        bar = "█" * max(1, int(fraction * 30))
+        bar = "#" * max(1, int(fraction * 30))
         lines.append(f"{label:<16} {bar} {fraction * 100:5.1f}%")
     if dist.chords:
         lines.append("\nCombinations/chords:")
@@ -411,7 +471,7 @@ def render_action_distribution(dist: ActionDistribution) -> str:
 
 def render_quality_report(recording: RecordingData, issues: list[QualityIssue]) -> str:
     lines = [
-        f"Quality Report — {recording.directory.name}",
+        f"Quality Report - {recording.directory.name}",
         "================",
         f"duration {recording.duration:.1f}s · {len(recording.frame_times)} frames "
         f"· fps {recording.fps:.0f} · {len(recording.events)} events · {len(recording.markers)} markers",

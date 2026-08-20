@@ -490,6 +490,34 @@ def test_events_loaded_into_combo_and_timeline(window):
     assert not window._timeline.grab().isNull()  # orange event squares render
 
 
+def test_delete_event_button_removes_selected_event(window):
+    from perception.events import Event, read_events
+
+    _write_events(window._recording, [
+        Event(kind="appearance", label="boss", start_t=0.4, end_t=0.4,
+              start_frame=4, end_frame=4, detail={}),
+        Event(kind="disappearance", label="projectile", start_t=1.2, end_t=1.5,
+              start_frame=12, end_frame=15, detail={}),
+    ])
+    window._load_events()
+    assert window._delete_event_btn.isEnabled()
+
+    window._events_combo.setCurrentIndex(1)
+    window._on_delete_event()
+    assert len(window._events) == 1
+    assert window._events_combo.count() == 1
+    assert "projectile" not in window._events_combo.itemText(0)
+    assert [e.label for e in read_events(window._recording.directory)] == ["boss"]
+
+    window._events_combo.setCurrentIndex(0)
+    window._on_delete_event()
+    assert window._events == []
+    assert window._events_combo.count() == 0
+    assert window._delete_event_btn.isEnabled() is False
+    window._on_delete_event()  # empty combo: no-op, no crash
+    assert read_events(window._recording.directory) == []
+
+
 def test_events_combo_jumps_to_event_start(window):
     from perception.events import Event
 
@@ -532,10 +560,210 @@ def test_events_ticks_drop_out_of_edited_regions(window):
     assert all(tick[0] > 0.5 for tick in window._timeline._annotation_ticks)
 
 
+# -------------------------------------------------- annotation navigation
+
+def _seed_annotations(window):
+    from perception.types import BoundingBox
+
+    for label, fi in (("first", 1), ("second", 10), ("third", 22)):
+        window._annotations.create(
+            label=label,
+            bbox=BoundingBox(0.1, 0.1, 0.4, 0.4),
+            frame_index=fi,
+            t=window._recording.frame_time(fi),
+        )
+    window._show_annotations.setChecked(True)
+
+
+def test_annotation_next_steps_forward_and_wraps(window):
+    _seed_annotations(window)
+
+    window._on_next_annotation()
+    assert window._selected_annotation_id == window._annotations.for_frame(1)[0].id
+    assert window._current_t == pytest.approx(window._recording.frame_time(1))
+    assert window._ann_label_edit.text() == "first"
+    assert window._timeline._playhead == pytest.approx(window._current_t, abs=0.11)
+
+    window._on_next_annotation()
+    assert window._ann_label_edit.text() == "second"
+    window._on_next_annotation()
+    assert window._ann_label_edit.text() == "third"
+    window._on_next_annotation()
+    assert window._ann_label_edit.text() == "first"  # wrapped around
+
+
+def test_annotation_prev_steps_backward_and_wraps(window):
+    _seed_annotations(window)
+
+    window._on_prev_annotation()
+    assert window._ann_label_edit.text() == "third"  # wraps from t=0 to the last
+    window._on_prev_annotation()
+    assert window._ann_label_edit.text() == "second"
+    window._on_prev_annotation()
+    assert window._ann_label_edit.text() == "first"
+
+
+def test_annotation_nav_is_noop_without_annotations(window):
+    window._annotations = None
+    window._annotation_status.setText("")
+    before = window._current_t
+    window._on_next_annotation()  # must not crash
+    window._on_prev_annotation()
+    assert window._current_t == before
+
+
 def test_events_row_empty_without_recording(tmp_path):
     win = PlayerWindow(recordings_root=str(tmp_path / "root"))
     assert win._events_combo.isEnabled() is False
     win.close()
+
+
+# -------------------------------------------------- overlay hover tooltip
+
+def test_overlay_hover_tooltip_shows_label_status_confidence():
+    from app.ui.annotation_overlay import AnnotationOverlay
+    from PySide6.QtWidgets import QLabel
+
+    label = QLabel()
+    overlay = AnnotationOverlay(label)
+    overlay.resize(200, 200)
+    overlay.set_annotations([
+        ("a1", "boss", "prediction", (0.1, 0.1, 0.3, 0.3), 0.42),
+        ("a2", "crate", "verified", (0.5, 0.5, 0.7, 0.7), None),
+    ])
+
+    overlay._update_hover(40, 40)  # inside box a1
+    assert overlay.toolTip() == "boss  [prediction]  confidence=0.42"
+    overlay._update_hover(120, 120)  # inside box a2, no confidence
+    assert overlay.toolTip() == "crate  [verified]"
+    overlay._update_hover(190, 190)  # empty area
+    assert overlay.toolTip() == ""
+    from PySide6.QtCore import QEvent
+
+    overlay.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert overlay.toolTip() == ""
+
+
+def test_candidate_boxes_carry_confidence(window):
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    window._load_perception(window._recording)
+    boxes = window._candidate_boxes(5)
+    assert boxes and boxes[0][-1] == 0.42
+    assert boxes[0][1] == "one"
+
+
+# ---------------------------------------------- overlay edit interactions
+
+def _mouse_event(x: float, y: float, pressed: bool = True):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    kind = QEvent.Type.MouseMove if not pressed else QEvent.Type.MouseButtonPress
+    button = Qt.MouseButton.LeftButton if pressed else Qt.MouseButton.NoButton
+    pos = QPointF(x, y)
+    return QMouseEvent(
+        kind, pos, pos, pos, button, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def _make_overlay():
+    from app.ui.annotation_overlay import AnnotationOverlay
+    from PySide6.QtWidgets import QLabel
+
+    label = QLabel()
+    overlay = AnnotationOverlay(label)
+    overlay.resize(200, 200)
+    return label, overlay
+
+
+def test_overlay_click_selects_box():
+    label, overlay = _make_overlay()
+    selected = []
+    overlay.annotationSelected.connect(lambda *a: selected.append(a))
+    overlay.set_annotations([
+        ("a1", "boss", "prediction", (0.1, 0.1, 0.3, 0.3), 0.42),
+        ("a2", "crate", "verified", (0.5, 0.5, 0.7, 0.7), None),
+    ])
+
+    overlay.mousePressEvent(_mouse_event(40, 40))
+    assert selected == [("a1",)]
+    assert overlay._selected_id == "a1"
+    overlay.mousePressEvent(_mouse_event(40, 40))  # a second click selects again
+    assert selected == [("a1",), ("a1",)]
+    overlay.mousePressEvent(_mouse_event(190, 190))  # empty area: nothing selected
+    assert selected == [("a1",), ("a1",)]
+    overlay.mouseReleaseEvent(_mouse_event(190, 190))
+
+
+def test_overlay_drag_moves_box():
+    label, overlay = _make_overlay()
+    moved = []
+    overlay.annotationMoved.connect(lambda *a: moved.append(a))
+    overlay.set_annotations([("a1", "boss", "verified", (0.1, 0.1, 0.3, 0.3), None)])
+    overlay.set_editing(True)
+
+    overlay.mousePressEvent(_mouse_event(40, 40))
+    overlay.mouseMoveEvent(_mouse_event(60, 40))  # +20 px in a 200 px widget
+    assert moved == [("a1", 0.1, 0.0)]
+    overlay.mouseReleaseEvent(_mouse_event(60, 40))
+    assert overlay._drag is None  # drag cancelled on release
+
+
+def test_overlay_handle_resizes_box():
+    label, overlay = _make_overlay()
+    resized = []
+    overlay.annotationResized.connect(lambda *a: resized.append(a))
+    overlay.set_annotations([("a1", "boss", "verified", (0.1, 0.1, 0.5, 0.5), None)])
+    overlay.set_editing(True)
+
+    # bottom-right corner sits at (100, 100); press just inside it and
+    # drag the corner to (140, 120)
+    overlay.mousePressEvent(_mouse_event(98, 98))
+    overlay.mouseMoveEvent(_mouse_event(140, 120))
+    assert len(resized) == 1
+    _, x1, y1, x2, y2 = resized[0]
+    assert (x1, y1, x2, y2) == pytest.approx((0.1, 0.1, 0.7, 0.6))
+    overlay.mouseReleaseEvent(_mouse_event(140, 120))
+
+
+def test_overlay_drag_creates_box():
+    label, overlay = _make_overlay()
+    created = []
+    overlay.annotationCreated.connect(lambda *a: created.append(a))
+    overlay.set_editing(True)
+
+    overlay.mousePressEvent(_mouse_event(20, 20))
+    overlay.mouseMoveEvent(_mouse_event(120, 100))
+    overlay.mouseReleaseEvent(_mouse_event(120, 100))
+    assert len(created) == 1
+    x1, y1, x2, y2 = created[0]
+    assert (x1, y1, x2, y2) == pytest.approx((0.1, 0.1, 0.6, 0.5))
+
+    # a tiny drag (under 12 px) is a click, not a new box
+    overlay.mousePressEvent(_mouse_event(150, 150))
+    overlay.mouseMoveEvent(_mouse_event(154, 154))
+    overlay.mouseReleaseEvent(_mouse_event(154, 154))
+    assert len(created) == 1
+
+
+def test_overlay_escape_cancels_create():
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    label, overlay = _make_overlay()
+    created = []
+    overlay.annotationCreated.connect(lambda *a: created.append(a))
+    overlay.set_editing(True)
+
+    overlay.mousePressEvent(_mouse_event(20, 20))
+    overlay.mouseMoveEvent(_mouse_event(120, 100))
+    assert overlay._create_box is not None
+    overlay.keyPressEvent(
+        QKeyEvent(QEvent.Type.KeyPress, int(Qt.Key.Key_Escape), Qt.KeyboardModifier.NoModifier)
+    )
+    assert overlay._create_box is None
+    assert created == []
 
 
 # ----------------------------------------------------- manual events (GUI)
@@ -820,6 +1048,31 @@ def test_review_jump_to_seeks_player_frame(window):
     assert not window._playing
 
 
+def test_review_edit_to_sets_edit_mode(window):
+    window._review_edit_to(12)
+    assert window._current_t == pytest.approx(window._recording.frame_time(12))
+    assert window._show_annotations.isChecked()
+    assert window._edit_annotations_btn.isChecked()
+    assert window._annotation_mode
+    assert not window._playing
+
+
+def test_review_dialog_edit_fires_callback(window):
+    from app.ui.review_dialog import ReviewDialog
+    from dataset.review import ReviewQueue
+
+    _write_perception(window._recording, {5: [("one", 0.42)]})
+    edited = []
+    queue = ReviewQueue(window._recording)
+    queue.refresh(strategies=["uncertainty"])
+    dialog = ReviewDialog(queue, on_edit=edited.append)
+    dialog._list.setCurrentRow(0)
+    assert dialog._edit_btn.isEnabled()
+    dialog._on_edit()
+    assert edited == [5]
+    dialog.close()
+
+
 def test_review_button_opens_dialog_and_saves_queue(window, monkeypatch):
     from PySide6.QtCore import QObject, Signal
     from dataset.review import ReviewQueue
@@ -829,10 +1082,11 @@ def test_review_button_opens_dialog_and_saves_queue(window, monkeypatch):
     class _FakeDialog(QObject):
         finished = Signal(int)
 
-        def __init__(self, queue, on_jump=None, parent=None):
+        def __init__(self, queue, on_jump=None, on_edit=None, parent=None):
             super().__init__()
             self.queue = queue
             self.on_jump = on_jump
+            self.on_edit = on_edit
             opened.append(self)
 
         def exec(self):
@@ -847,4 +1101,6 @@ def test_review_button_opens_dialog_and_saves_queue(window, monkeypatch):
     assert window._review_status.text().startswith("Review:")
     assert opened[0].on_jump.__self__ is window
     assert opened[0].on_jump.__func__ is PlayerWindow._review_jump_to
+    assert opened[0].on_edit.__self__ is window
+    assert opened[0].on_edit.__func__ is PlayerWindow._review_edit_to
 

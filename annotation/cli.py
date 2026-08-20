@@ -178,3 +178,8 @@ def run(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, OSError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(run())
+

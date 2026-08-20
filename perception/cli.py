@@ -216,3 +216,9 @@ def run(argv: list[str] | None = None) -> int:
     if args.command == "events":
         return _cmd_events(args)
     return 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(run())
+

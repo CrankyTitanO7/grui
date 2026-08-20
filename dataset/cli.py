@@ -114,9 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     rbuild = review_sub.add_parser("build", help="(re)build the queue for a recording")
     rbuild.add_argument("recording_dir")
     rbuild.add_argument("--strategy", action="append", default=None,
-                        choices=("uncertainty", "rare_action", "novelty", "annotation_uncertainty"),
+                        choices=("uncertainty", "rare_action", "novelty",
+                                 "annotation_uncertainty", "transition", "coverage"),
                         help="ranking strategy (repeatable; default: all)")
     rbuild.add_argument("--limit", type=int, default=200)
+    rbuild.add_argument("--recording-root", default=None, metavar="ROOT",
+                        help="recordings root used by the coverage strategy "
+                             "(situations under-covered across demos)")
     rlist = review_sub.add_parser("list", help="list pending queue items")
     rlist.add_argument("recording_dir")
     rlist.add_argument("--json", action="store_true", help="output as JSON")
@@ -147,9 +151,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     coverage.add_argument(
         "--only", action="append", default=None, metavar="NAME",
-        help="only analyse recordings with this directory name (repeatable)",
+        help="only report a recording whose folder name or session_id matches (repeatable)",
     )
     coverage.add_argument("--json", action="store_true", help="output raw counts as JSON")
+
+    filterdemos = sub.add_parser(
+        "filter-demos",
+        help="find demonstrations containing given action chords (section 19: rare actions)",
+    )
+    filterdemos.add_argument("root", help="recordings root directory, or a single recording directory")
+    filterdemos.add_argument("--contains", action="append", default=None, metavar="CHORD",
+                             help='action chord to look for, e.g. "A + SPACE" or KeyQ (repeatable, OR-ed)')
     return parser
 
 
@@ -216,7 +228,7 @@ def _cmd_health(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     elif len([r for r in per_demo if r.duration < 5]) > max(1, len(per_demo) // 2):
-        print("\n⚠ most demonstrations are under 5s — the dataset may be too sparse.")
+        print("\n! most demonstrations are under 5s - the dataset may be too sparse.")
     return 0
 
 
@@ -421,8 +433,31 @@ def _cmd_coverage(args: argparse.Namespace) -> int:
             report,
             min_demos=args.min_demos,
             max_situations=args.max_situations,
+            recordings=recordings,
         )
     )
+    return 0
+
+
+def _cmd_filter_demos(args: argparse.Namespace) -> int:
+    from dataset.health import filter_demos, parse_chord
+
+    contains = [parse_chord(text) for text in (args.contains or [])]
+    if not contains:
+        print("error: give at least one --contains CHORD", file=sys.stderr)
+        return 2
+    described = ", ".join(" + ".join(codes) for codes in contains)
+    try:
+        matches = filter_demos(args.root, contains)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not matches:
+        print(f"no demonstrations under {args.root} contain {described}")
+        return 0
+    print(f"{len(matches)} demonstration(s) under {args.root} contain {described}:")
+    for name, total, count in matches:
+        print(f"  {name}: {count} matching frame(s) of {total}")
     return 0
 
 
@@ -436,7 +471,11 @@ def _cmd_review_handler(args: argparse.Namespace) -> int:
         return 1
     queue = ReviewQueue(recording)
     if args.review_sub == "build":
-        items = queue.refresh(strategies=args.strategy, limit=args.limit)
+        items = queue.refresh(
+            strategies=args.strategy,
+            limit=args.limit,
+            recording_root=args.recording_root,
+        )
         print(f"review queue: {len(items)} candidates "
               f"({len(queue.pending())} pending) → {queue.path}")
         return 0
@@ -488,4 +527,12 @@ def run(argv: list[str] | None = None) -> int:
         return _cmd_review_handler(args)
     if args.command == "coverage":
         return _cmd_coverage(args)
+    if args.command == "filter-demos":
+        return _cmd_filter_demos(args)
     return 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(run())
+

@@ -9,7 +9,7 @@ import pytest
 from recorder import session as session_module
 from recorder.config import RecorderConfig
 from recorder.session import RecordingSession, SessionState
-from fakes import FakeScreen, patch_session_components
+from tests.fakes import FakeScreen, patch_session_components
 
 
 @pytest.fixture()
@@ -189,19 +189,19 @@ def test_start_failure_cleans_up_to_error_state(tmp_path, monkeypatch):
 
 
 def _fake_keyboard():
-    from fakes import FakeKeyboard
+    from tests.fakes import FakeKeyboard
 
     return FakeKeyboard
 
 
 def _fake_mouse():
-    from fakes import FakeMouse
+    from tests.fakes import FakeMouse
 
     return FakeMouse
 
 
 def _fake_encoder():
-    from fakes import FakeEncoder
+    from tests.fakes import FakeEncoder
 
     return FakeEncoder
 
